@@ -1,11 +1,11 @@
-// reminders-mcp — lokale MCP-server voor Apple Herinneringen (macOS, EventKit).
+// reminders-mcp — local MCP server for Apple Reminders (macOS, EventKit).
 //
-// Ontwerpregels:
-//  * Standaard alleen-lezen. Schrijftools bestaan alleen als REMINDERS_MCP_WRITE ze aanzet
-//    (create, update, delete of all); zonder die instelling worden ze niet eens aangeboden.
-//  * Geen opslag: herinneringen bestaan alleen in het geheugen tijdens het beantwoorden van één aanroep.
-//  * Geen inhoud in logs: stderr bevat alleen toolnamen, aantallen en doorlooptijden.
-//  * Transport: MCP over stdio (JSON-RPC 2.0, één JSON-bericht per regel).
+// Design rules:
+//  * Read-only by default. Write tools only exist when REMINDERS_MCP_WRITE enables them
+//    (create, update, delete or all); without that setting they are not even offered.
+//  * No storage: reminders only exist in memory while a single call is being answered.
+//  * No content in logs: stderr only contains tool names, counts and durations.
+//  * Transport: MCP over stdio (JSON-RPC 2.0, one JSON message per line).
 
 import EventKit
 import Foundation
@@ -15,7 +15,7 @@ let serverName = "apple-reminders"
 let serverVersion = "1.1.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
-// MARK: - Hulpfuncties
+// MARK: - Helpers
 
 func log(_ message: String) {
     FileHandle.standardError.write(Data("[reminders-mcp] \(message)\n".utf8))
@@ -41,10 +41,10 @@ func jsonString(_ object: Any, pretty: Bool = true) -> String {
 
 func orNull(_ value: Any?) -> Any { value ?? NSNull() }
 
-// MARK: - Tijd en "vandaag"
+// MARK: - Time and "today"
 
-/// Momentopname van de lokale tijdzone van de Mac. Wordt bij elke aanroep opnieuw bepaald,
-/// zodat een tijdzonewissel (reizen, zomertijd) ook in een lang draaiend proces klopt.
+/// Snapshot of the Mac's local time zone. Determined again on every call, so that a
+/// time zone change (travel, daylight saving time) is also correct in a long-running process.
 struct LocalTime {
     let timeZone: TimeZone
     let calendar: Calendar
@@ -78,7 +78,7 @@ struct LocalTime {
         return f.string(from: date)
     }
 
-    /// Accepteert "YYYY-MM-DD", "vandaag"/"today", "morgen"/"tomorrow", "gisteren"/"yesterday".
+    /// Accepts "YYYY-MM-DD", "vandaag"/"today", "morgen"/"tomorrow", "gisteren"/"yesterday".
     func parseDay(_ raw: String) throws -> Date {
         let text = raw.trimmingCharacters(in: .whitespaces).lowercased()
         switch text {
@@ -89,12 +89,12 @@ struct LocalTime {
         }
         let parts = text.split(separator: "-").compactMap { Int($0) }
         guard parts.count == 3, text.count == 10 else {
-            throw ToolError(message: "Ongeldige datum '\(raw)'. Gebruik het formaat YYYY-MM-DD (bijv. 2026-11-23), of 'vandaag' / 'morgen'.")
+            throw ToolError(message: "Invalid date '\(raw)'. Use the format YYYY-MM-DD (e.g. 2026-11-23), or 'today' / 'tomorrow'.")
         }
         var comps = DateComponents()
         comps.year = parts[0]; comps.month = parts[1]; comps.day = parts[2]
         guard let date = calendar.date(from: comps), dayString(date) == text else {
-            throw ToolError(message: "Datum '\(raw)' bestaat niet in de kalender.")
+            throw ToolError(message: "Date '\(raw)' does not exist in the calendar.")
         }
         return date
     }
@@ -107,22 +107,22 @@ struct LocalTime {
             "identifier": timeZone.identifier,
             "utc_offset": offset,
             "abbreviation": orNull(timeZone.abbreviation(for: now)),
-            "source": "Systeemtijdzone van deze Mac, bij elke aanroep opnieuw uitgelezen",
+            "source": "System time zone of this Mac, read again on every call",
         ]
     }
 }
 
-// MARK: - Toegang
+// MARK: - Access
 
 let accessHelpSteps: [String] = [
-    "Open Systeeminstellingen > Privacy en beveiliging > Herinneringen.",
-    "Zoek de app die deze server start (bijv. Codex, Terminal, iTerm of 'reminders-mcp') en zet de schakelaar aan / kies 'Volledige toegang'.",
-    "Staat de app er niet tussen? Voer dan in Terminal `tccutil reset Reminders` uit en start de server opnieuw; macOS toont dan opnieuw het toestemmingsvenster.",
-    "Herstart daarna de app die de MCP-server start, zodat de nieuwe toestemming actief wordt.",
+    "Open System Settings > Privacy & Security > Reminders.",
+    "Find the app that starts this server (e.g. Codex, Terminal, iTerm or 'reminders-mcp') and turn the switch on / choose 'Full Access'.",
+    "Is the app not listed? Then run `tccutil reset Reminders` in Terminal and start the server again; macOS will then show the permission prompt again.",
+    "Afterwards, restart the app that starts the MCP server so the new permission takes effect.",
 ]
 
 let accessScopeNote =
-    "EventKit kent voor Herinneringen geen aparte leestoestemming: 'volledige toegang' is de kleinste toestemming waarmee lezen mogelijk is. Deze server leest standaard alleen; aanmaken, wijzigen en verwijderen staan uit tenzij de gebruiker ze zelf aanzet met REMINDERS_MCP_WRITE."
+    "EventKit has no separate read permission for Reminders: 'full access' is the smallest permission that allows reading. By default this server only reads; creating, editing and deleting are disabled unless the user enables them with REMINDERS_MCP_WRITE."
 
 func statusName(_ status: EKAuthorizationStatus) -> String {
     switch status {
@@ -143,26 +143,26 @@ func accessReport(_ status: EKAuthorizationStatus) -> [String: Any] {
     switch status {
     case .fullAccess:
         report["can_read"] = true
-        report["explanation"] = "Toegang tot Herinneringen is verleend. De server kan herinneringen lezen."
+        report["explanation"] = "Access to Reminders has been granted. The server can read reminders."
     case .notDetermined:
         report["can_read"] = false
-        report["explanation"] = "Er is nog geen keuze gemaakt. Bij de eerste leesactie toont macOS een toestemmingsvenster; kies daar 'Sta toe' / 'Volledige toegang'. Verschijnt er geen venster, volg dan de stappen."
+        report["explanation"] = "No choice has been made yet. On the first read, macOS shows a permission prompt; choose 'Allow' / 'Full Access' there. If no prompt appears, follow the steps."
         report["steps"] = accessHelpSteps
     case .denied:
         report["can_read"] = false
-        report["explanation"] = "Toegang tot Herinneringen is geweigerd voor de app die deze server start. macOS vraagt dit niet opnieuw; zet de toegang handmatig aan."
+        report["explanation"] = "Access to Reminders has been denied for the app that starts this server. macOS will not ask again; turn access on manually."
         report["steps"] = accessHelpSteps
     case .restricted:
         report["can_read"] = false
-        report["explanation"] = "Toegang tot Herinneringen is op deze Mac geblokkeerd door een beperking (bijv. een MDM-profiel van de werkgever of Schermtijd). Dit kan alleen een beheerder opheffen."
-        report["steps"] = ["Controleer Systeeminstellingen > Schermtijd > Materiaal en privacy.", "Vraag de beheerder van deze Mac of een configuratieprofiel de toegang tot Herinneringen blokkeert."]
+        report["explanation"] = "Access to Reminders is blocked on this Mac by a restriction (e.g. an employer's MDM profile or Screen Time). Only an administrator can lift this."
+        report["steps"] = ["Check System Settings > Screen Time > Content & Privacy.", "Ask the administrator of this Mac whether a configuration profile blocks access to Reminders."]
     case .writeOnly:
         report["can_read"] = false
-        report["explanation"] = "Er is alleen schrijftoegang verleend; lezen is daarmee niet mogelijk. Kies 'Volledige toegang' in de systeeminstellingen."
+        report["explanation"] = "Only write access has been granted; reading is not possible with that. Choose 'Full Access' in System Settings."
         report["steps"] = accessHelpSteps
     @unknown default:
         report["can_read"] = true
-        report["explanation"] = "Toegang verleend (oude toestemmingsvorm)."
+        report["explanation"] = "Access granted (legacy permission type)."
     }
     return report
 }
@@ -171,28 +171,28 @@ struct AccessDenied: Error {
     let report: [String: Any]
 }
 
-/// Geeft een verse EKEventStore terug (per aanroep, zodat iCloud-wijzigingen altijd zichtbaar zijn)
-/// en vraagt zo nodig eenmalig toestemming aan.
+/// Returns a fresh EKEventStore (per call, so iCloud changes are always visible)
+/// and requests permission once if needed.
 func obtainStore(promptIfNeeded: Bool = true) throws -> EKEventStore {
     var status = EKEventStore.authorizationStatus(for: .reminder)
     if status == .notDetermined && promptIfNeeded {
-        log("toestemming nog niet bepaald; macOS-toestemmingsvenster aangevraagd")
+        log("permission not determined yet; macOS permission prompt requested")
         let requester = EKEventStore()
         let done = DispatchSemaphore(value: 0)
         requester.requestFullAccessToReminders { granted, error in
-            let code = (error as NSError?).map { "\($0.domain) \($0.code)" } ?? "geen fout"
-            log("toestemmingsverzoek afgerond: granted=\(granted) (\(code))")
+            let code = (error as NSError?).map { "\($0.domain) \($0.code)" } ?? "no error"
+            log("permission request finished: granted=\(granted) (\(code))")
             done.signal()
         }
         if done.wait(timeout: .now() + 120) == .timedOut {
             var report = accessReport(.notDetermined)
-            report["explanation"] = "Het macOS-toestemmingsvenster is aangevraagd maar binnen 2 minuten niet beantwoord (of macOS kon het niet tonen). Beantwoord het venster en probeer opnieuw."
+            report["explanation"] = "The macOS permission prompt was requested but not answered within 2 minutes (or macOS could not show it). Answer the prompt and try again."
             throw AccessDenied(report: report)
         }
         status = EKEventStore.authorizationStatus(for: .reminder)
         if status == .notDetermined {
             var report = accessReport(.notDetermined)
-            report["explanation"] = "macOS heeft het toestemmingsverzoek afgehandeld zonder een venster te tonen en zonder toegang te verlenen. Dat gebeurt wanneer het proces geen toestemmingsvenster mag tonen (bijv. gestart vanuit een achtergrondproces zonder schermsessie). Voer eenmalig in Terminal `reminders-mcp --check` uit en kies 'Sta toe'; daarna werkt de server ook vanuit de agent."
+            report["explanation"] = "macOS handled the permission request without showing a prompt and without granting access. This happens when the process is not allowed to show a permission prompt (e.g. started from a background process without a screen session). Run `reminders-mcp --check` once in Terminal and choose 'Allow'; after that the server also works from the agent."
             throw AccessDenied(report: report)
         }
     }
@@ -201,7 +201,7 @@ func obtainStore(promptIfNeeded: Bool = true) throws -> EKEventStore {
     return EKEventStore()
 }
 
-// MARK: - Ophalen (alleen lezen)
+// MARK: - Fetching (read-only)
 
 func reminderCalendars(_ store: EKEventStore, filter: [String]?) throws -> [EKCalendar] {
     let all = store.calendars(for: .reminder)
@@ -214,7 +214,7 @@ func reminderCalendars(_ store: EKEventStore, filter: [String]?) throws -> [EKCa
     }
     if !unknown.isEmpty {
         let available = all.map { $0.title }.sorted().joined(separator: ", ")
-        throw ToolError(message: "Onbekende lijst(en): \(unknown.joined(separator: ", ")). Beschikbare lijsten: \(available)")
+        throw ToolError(message: "Unknown list(s): \(unknown.joined(separator: ", ")). Available lists: \(available)")
     }
     return selected
 }
@@ -232,7 +232,7 @@ func fetchOpenReminders(_ store: EKEventStore, calendars: [EKCalendar]) -> [EKRe
     return result.value.filter { !$0.isCompleted }
 }
 
-// MARK: - Vervaldatum
+// MARK: - Due date
 
 struct Due {
     let instant: Date
@@ -248,7 +248,7 @@ func resolveDate(_ components: DateComponents?, local: LocalTime) -> Due? {
     var cal = local.calendar
     if !allDay {
         comps.hour = c.hour; comps.minute = c.minute ?? 0; comps.second = c.second ?? 0
-        // Een tijd mét tijdzone is een vast moment; zonder tijdzone is het een "zwevende" lokale tijd.
+        // A time with a time zone is a fixed instant; without a time zone it is a "floating" local time.
         if let tz = c.timeZone { cal.timeZone = tz }
     }
     guard let instant = cal.date(from: comps) else { return nil }
@@ -265,10 +265,10 @@ func dateJSON(_ due: Due, local: LocalTime) -> [String: Any] {
     ]
 }
 
-// MARK: - Herhaling, prioriteit, meldingen
+// MARK: - Recurrence, priority, alarms
 
-let weekdayNames = ["", "zo", "ma", "di", "wo", "do", "vr", "za"]
-let monthNames = ["", "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"]
+let weekdayNames = ["", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+let monthNames = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 func recurrenceJSON(_ reminder: EKReminder, local: LocalTime) -> [String: Any] {
     guard reminder.hasRecurrenceRules, let rules = reminder.recurrenceRules, !rules.isEmpty else {
@@ -279,27 +279,27 @@ func recurrenceJSON(_ reminder: EKReminder, local: LocalTime) -> [String: Any] {
     for rule in rules {
         let (code, singular, plural): (String, String, String)
         switch rule.frequency {
-        case .daily: (code, singular, plural) = ("daily", "dag", "dagen")
-        case .weekly: (code, singular, plural) = ("weekly", "week", "weken")
-        case .monthly: (code, singular, plural) = ("monthly", "maand", "maanden")
-        case .yearly: (code, singular, plural) = ("yearly", "jaar", "jaar")
-        @unknown default: (code, singular, plural) = ("unknown", "periode", "perioden")
+        case .daily: (code, singular, plural) = ("daily", "day", "days")
+        case .weekly: (code, singular, plural) = ("weekly", "week", "weeks")
+        case .monthly: (code, singular, plural) = ("monthly", "month", "months")
+        case .yearly: (code, singular, plural) = ("yearly", "year", "years")
+        @unknown default: (code, singular, plural) = ("unknown", "period", "periods")
         }
         var item: [String: Any] = ["frequency": code, "interval": rule.interval]
-        var summary = rule.interval == 1 ? "elke \(singular)" : "elke \(rule.interval) \(plural)"
-        if code == "yearly" && rule.interval == 1 { summary = "elk jaar" }
+        var summary = rule.interval == 1 ? "every \(singular)" : "every \(rule.interval) \(plural)"
+        if code == "yearly" && rule.interval == 1 { summary = "every year" }
 
         if let days = rule.daysOfTheWeek, !days.isEmpty {
             let labels = days.map { d -> String in
                 let name = weekdayNames[min(max(d.dayOfTheWeek.rawValue, 0), 7)]
-                return d.weekNumber == 0 ? name : "\(d.weekNumber)e \(name)"
+                return d.weekNumber == 0 ? name : "#\(d.weekNumber) \(name)"
             }
             item["days_of_week"] = labels
-            summary += " op " + labels.joined(separator: ", ")
+            summary += " on " + labels.joined(separator: ", ")
         }
         if let days = rule.daysOfTheMonth, !days.isEmpty {
             item["days_of_month"] = days.map { $0.intValue }
-            summary += " op dag " + days.map { $0.stringValue }.joined(separator: ", ")
+            summary += " on day " + days.map { $0.stringValue }.joined(separator: ", ")
         }
         if let months = rule.monthsOfTheYear, !months.isEmpty {
             let labels = months.map { monthNames[min(max($0.intValue, 0), 12)] }
@@ -312,10 +312,10 @@ func recurrenceJSON(_ reminder: EKReminder, local: LocalTime) -> [String: Any] {
         if let end = rule.recurrenceEnd {
             if let endDate = end.endDate {
                 item["ends_on"] = local.dayString(endDate)
-                summary += " tot en met \(local.dayString(endDate))"
+                summary += " until \(local.dayString(endDate))"
             } else if end.occurrenceCount > 0 {
                 item["ends_after_occurrences"] = end.occurrenceCount
-                summary += ", \(end.occurrenceCount) keer"
+                summary += end.occurrenceCount == 1 ? ", once" : ", \(end.occurrenceCount) times"
             }
         } else {
             item["ends_on"] = NSNull()
@@ -330,12 +330,12 @@ func recurrenceJSON(_ reminder: EKReminder, local: LocalTime) -> [String: Any] {
 func priorityJSON(_ value: Int) -> [String: Any] {
     let label: String
     switch value {
-    case 0: label = "geen"
-    case 1...4: label = "hoog"
-    case 5: label = "normaal"
-    default: label = "laag"
+    case 0: label = "none"
+    case 1...4: label = "high"
+    case 5: label = "medium"
+    default: label = "low"
     }
-    return ["value": value, "label": label, "scale": "0 = geen, 1-4 = hoog, 5 = normaal, 6-9 = laag"]
+    return ["value": value, "label": label, "scale": "0 = none, 1-4 = high, 5 = medium, 6-9 = low"]
 }
 
 func alarmsJSON(_ reminder: EKReminder, local: LocalTime) -> [[String: Any]] {
@@ -344,9 +344,9 @@ func alarmsJSON(_ reminder: EKReminder, local: LocalTime) -> [[String: Any]] {
         if let location = alarm.structuredLocation {
             let proximity: String
             switch alarm.proximity {
-            case .enter: proximity = "bij aankomst"
-            case .leave: proximity = "bij vertrek"
-            default: proximity = "onbekend"
+            case .enter: proximity = "on arrival"
+            case .leave: proximity = "on departure"
+            default: proximity = "unknown"
             }
             return ["type": "location", "location": orNull(location.title), "trigger": proximity]
         }
@@ -357,32 +357,32 @@ func alarmsJSON(_ reminder: EKReminder, local: LocalTime) -> [[String: Any]] {
     }
 }
 
-// MARK: - Subtaken (optioneel, via de lokale Herinneringen-database)
+// MARK: - Subtasks (optional, via the local Reminders database)
 
 let subtasksEventKitNote =
-    "EventKit geeft geen ouder/kind-relatie tussen herinneringen terug. Subtaken staan wél in de resultaten, maar als gewone, losse herinneringen zonder verwijzing naar hun hoofdtaak."
+    "EventKit does not return a parent/child relationship between reminders. Subtasks are included in the results, but as ordinary, separate reminders without a reference to their parent task."
 
 struct SubtaskLookup {
-    /// kind-id -> ouder-id (id's zoals EventKit ze kent)
+    /// child id -> parent id (ids as EventKit knows them)
     var parentOf: [String: String] = [:]
     var status: String = "unavailable"
     var note: String = subtasksEventKitNote
 }
 
-/// Leest uitsluitend id-paren (kind, ouder) uit de lokale Herinneringen-database. Er wordt geen
-/// titel, notitie of andere inhoud uit de database gelezen. Alleen actief met
-/// REMINDERS_MCP_SUBTASKS=sqlite; vereist Volledige schijftoegang voor de app die de server start.
+/// Reads only id pairs (child, parent) from the local Reminders database. No title, note or
+/// other content is read from the database. Only active with
+/// REMINDERS_MCP_SUBTASKS=sqlite; requires Full Disk Access for the app that starts the server.
 func loadSubtaskLookup() -> SubtaskLookup {
     var lookup = SubtaskLookup()
     guard ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite" else {
-        lookup.note = subtasksEventKitNote + " Optioneel kan de server de relatie uit de lokale Herinneringen-database lezen (zet REMINDERS_MCP_SUBTASKS=sqlite; vereist Volledige schijftoegang). Dat staat nu uit."
+        lookup.note = subtasksEventKitNote + " Optionally the server can read the relationship from the local Reminders database (set REMINDERS_MCP_SUBTASKS=sqlite; requires Full Disk Access). This is currently disabled."
         return lookup
     }
     let storesURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Group Containers/group.com.apple.reminders/Container_v1/Stores")
     guard let files = try? FileManager.default.contentsOfDirectory(at: storesURL, includingPropertiesForKeys: nil) else {
         lookup.status = "sqlite_no_access"
-        lookup.note = subtasksEventKitNote + " De database-aanvulling staat aan, maar de map met de Herinneringen-database is niet leesbaar. Geef de app die deze server start Volledige schijftoegang (Systeeminstellingen > Privacy en beveiliging > Volledige schijftoegang) of zet REMINDERS_MCP_SUBTASKS uit."
+        lookup.note = subtasksEventKitNote + " The database enrichment is enabled, but the folder containing the Reminders database is not readable. Give the app that starts this server Full Disk Access (System Settings > Privacy & Security > Full Disk Access) or turn REMINDERS_MCP_SUBTASKS off."
         return lookup
     }
     var databasesRead = 0
@@ -423,15 +423,15 @@ func loadSubtaskLookup() -> SubtaskLookup {
     }
     if databasesRead == 0 {
         lookup.status = "sqlite_schema_unsupported"
-        lookup.note = subtasksEventKitNote + " De database-aanvulling staat aan, maar het (ongedocumenteerde) databaseschema van deze macOS-versie wordt niet herkend. Subtaakrelaties zijn daarom niet beschikbaar."
+        lookup.note = subtasksEventKitNote + " The database enrichment is enabled, but the (undocumented) database schema of this macOS version is not recognized. Subtask relationships are therefore not available."
     } else {
         lookup.status = "sqlite_ok"
-        lookup.note = "Subtaakrelaties zijn aangevuld uit de lokale Herinneringen-database (alleen id's gelezen, ongedocumenteerd schema, kan na een macOS-update wegvallen). Alleen open subtaken worden getoond; voltooide subtaken niet."
+        lookup.note = "Subtask relationships were added from the local Reminders database (only ids read, undocumented schema, may stop working after a macOS update). Only open subtasks are shown; completed subtasks are not."
     }
     return lookup
 }
 
-// MARK: - Herinnering -> JSON
+// MARK: - Reminder -> JSON
 
 struct Item {
     let reminder: EKReminder
@@ -492,7 +492,7 @@ struct Renderer {
         } else {
             out["has_due_date"] = false
             out["due"] = NSNull()
-            out["due_note"] = "Geen vervaldatum ingesteld."
+            out["due_note"] = "No due date set."
             out["is_overdue"] = false
         }
         return out
@@ -531,7 +531,7 @@ struct Renderer {
                     out["parent"] = ["id": parent.reminder.calendarItemIdentifier, "title": parent.reminder.title ?? ""]
                 } else {
                     out["parent"] = NSNull()
-                    out["parent_note"] = "Hoofdtaak is voltooid of valt buiten de opgevraagde lijsten."
+                    out["parent_note"] = "Parent task is completed or falls outside the requested lists."
                 }
             } else {
                 out["is_subtask"] = false
@@ -545,17 +545,17 @@ struct Renderer {
 
 func fieldAvailability(_ lookup: SubtaskLookup) -> [String: Any] {
     [
-        "available_via_eventkit": ["title", "list", "account", "due date/time", "start date", "notes", "priority", "recurrence", "alarms (tijd en locatie)", "created/modified"],
+        "available_via_eventkit": ["title", "list", "account", "due date/time", "start date", "notes", "priority", "recurrence", "alarms (time and location)", "created/modified"],
         "subtasks": ["status": lookup.status, "note": lookup.note],
         "not_available_via_eventkit": [
-            "tags": "Tags (#) worden niet door EventKit teruggegeven.",
-            "flagged": "De markering (vlag) is niet beschikbaar.",
-            "sections_and_columns": "Secties/kolommen binnen een lijst zijn niet beschikbaar.",
-            "smart_lists": "Slimme lijsten (Vandaag, Gepland, eigen slimme lijsten) bestaan niet in EventKit; deze server berekent het dagoverzicht zelf.",
-            "attachments": "Afbeeldingen en bijlagen zijn niet beschikbaar.",
-            "url_field": "Het URL-veld uit de Herinneringen-app komt doorgaans niet door via EventKit; 'url' ontbreekt dan.",
-            "assignee": "Toewijzing in gedeelde lijsten is niet beschikbaar.",
-            "early_reminder_and_messaging": "'Vroege herinnering' en 'Bij berichten sturen naar' zijn niet (betrouwbaar) beschikbaar.",
+            "tags": "Tags (#) are not returned by EventKit.",
+            "flagged": "The flag is not available.",
+            "sections_and_columns": "Sections/columns within a list are not available.",
+            "smart_lists": "Smart lists (Today, Scheduled, custom smart lists) do not exist in EventKit; this server computes the daily overview itself.",
+            "attachments": "Images and attachments are not available.",
+            "url_field": "The URL field from the Reminders app usually does not come through via EventKit; 'url' is then missing.",
+            "assignee": "Assignment in shared lists is not available.",
+            "early_reminder_and_messaging": "'Early Reminder' and 'When Messaging' are not (reliably) available.",
         ],
     ]
 }
@@ -577,7 +577,7 @@ func stringArray(_ value: Any?) -> [String]? {
 
 func toolDailyOverview(_ args: [String: Any]) throws -> [String: Any] {
     let local = LocalTime()
-    let target = try local.parseDay(args["date"] as? String ?? "vandaag")
+    let target = try local.parseDay(args["date"] as? String ?? "today")
     let targetEnd = local.calendar.date(byAdding: .day, value: 1, to: target)!
     let includeOverdue = args["include_overdue"] as? Bool ?? true
     let includeUndated = args["include_undated"] as? Bool ?? false
@@ -603,11 +603,11 @@ func toolDailyOverview(_ args: [String: Any]) throws -> [String: Any] {
         "generated_at": local.iso(local.now),
         "time_zone": local.timeZoneInfo,
         "definition": [
-            "day": "De opgevraagde dag is de kalenderdag \(dateText) van 00:00 tot 24:00 in de lokale tijdzone van deze Mac (\(local.timeZone.identifier)). Zonder 'date' is dat de dag van 'generated_at'.",
-            "due_on_date": "Open herinneringen waarvan de vervaldatum op die dag valt. Herinneringen met een tijdzone worden eerst naar lokale tijd omgerekend; herinneringen voor de hele dag tellen op hun kalenderdatum. Een tijdstip dat vandaag al voorbij is blijft hier staan, met is_overdue = true.",
-            "overdue": "Open herinneringen met een vervaldatum vóór 00:00 van \(local.dayString(overdueBefore)) (de vroegste van de opgevraagde dag en vandaag). Apart van 'due_on_date'.",
-            "undated": "Open herinneringen zonder vervaldatum; alleen meegegeven met include_undated = true.",
-            "scope": "Alleen niet-voltooide herinneringen uit alle accounts die op deze Mac met Herinneringen synchroniseren (iCloud en eventuele andere).",
+            "day": "The requested day is the calendar day \(dateText) from 00:00 to 24:00 in the local time zone of this Mac (\(local.timeZone.identifier)). Without 'date' that is the day of 'generated_at'.",
+            "due_on_date": "Open reminders whose due date falls on that day. Reminders with a time zone are first converted to local time; all-day reminders count on their calendar date. A time that has already passed today stays here, with is_overdue = true.",
+            "overdue": "Open reminders with a due date before 00:00 on \(local.dayString(overdueBefore)) (the earlier of the requested day and today). Separate from 'due_on_date'.",
+            "undated": "Open reminders without a due date; only included with include_undated = true.",
+            "scope": "Only incomplete reminders from all accounts that sync with Reminders on this Mac (iCloud and any others).",
         ],
         "due_on_date": sortItems(dueOnDate).map(renderer.render),
         "counts": [
@@ -620,9 +620,9 @@ func toolDailyOverview(_ args: [String: Any]) throws -> [String: Any] {
         "read_only": true,
     ]
     if includeOverdue { result["overdue"] = sortItems(overdue).map(renderer.render) }
-    else { result["overdue_note"] = "Achterstallige herinneringen zijn weggelaten (include_overdue = false); zie counts.overdue." }
+    else { result["overdue_note"] = "Overdue reminders have been omitted (include_overdue = false); see counts.overdue." }
     if includeUndated { result["undated"] = sortItems(undated).map(renderer.render) }
-    else if !undated.isEmpty { result["undated_note"] = "\(undated.count) open herinnering(en) zonder vervaldatum zijn niet opgenomen. Gebruik include_undated = true of reminders_list_open." }
+    else if !undated.isEmpty { result["undated_note"] = "\(undated.count) open reminder(s) without a due date are not included. Use include_undated = true or reminders_list_open." }
     log("reminders_daily_overview: due_on_date=\(dueOnDate.count) overdue=\(overdue.count) undated=\(undated.count)")
     return result
 }
@@ -657,7 +657,7 @@ func toolListOpen(_ args: [String: Any]) throws -> [String: Any] {
             "due_from": orNull(from.map(local.dayString)),
             "due_to": orNull(toDay.map(local.dayString)),
             "include_undated": includeUndated,
-            "note": "due_from en due_to zijn kalenderdagen (inclusief) in de lokale tijdzone van deze Mac.",
+            "note": "due_from and due_to are calendar days (inclusive) in the local time zone of this Mac.",
         ],
         "counts": [
             "returned": selected.count,
@@ -666,7 +666,7 @@ func toolListOpen(_ args: [String: Any]) throws -> [String: Any] {
             "open_total": items.count,
             "without_due_date": selected.filter { $0.due == nil }.count,
         ],
-        "sort": "Op vervaldatum (oudste eerst), daarna prioriteit; herinneringen zonder vervaldatum staan achteraan.",
+        "sort": "By due date (oldest first), then priority; reminders without a due date come last.",
         "reminders": selected.map(renderer.render),
         "field_availability": fieldAvailability(renderer.lookup),
         "read_only": true,
@@ -693,7 +693,7 @@ func toolLists(_ args: [String: Any]) throws -> [String: Any] {
     return [
         "generated_at": local.iso(local.now),
         "lists": lists,
-        "note": "Slimme lijsten en lijstgroepen (mappen) zijn niet zichtbaar via EventKit.",
+        "note": "Smart lists and list groups (folders) are not visible via EventKit.",
         "read_only": true,
     ]
 }
@@ -706,31 +706,31 @@ func toolAccessStatus(_ args: [String: Any]) -> [String: Any] {
     report["read_only"] = !writeAccess.any
     report["write_tools"] = writeAccess.summary
     report["subtasks"] = ["note": subtasksEventKitNote, "sqlite_enrichment_enabled": ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite"]
-    report["responsible_app_note"] = "macOS koppelt de toestemming aan de app die deze server start (bijv. Codex of Terminal). Elke startende app heeft dus zijn eigen toestemming nodig."
+    report["responsible_app_note"] = "macOS ties the permission to the app that starts this server (e.g. Codex or Terminal). So every launching app needs its own permission."
     return report
 }
 
 let listsProperty: [String: Any] = [
     "type": "array", "items": ["type": "string"],
-    "description": "Optioneel: beperk tot deze lijstnamen (hoofdletterongevoelig). Standaard alle lijsten.",
+    "description": "Optional: restrict to these list names (case-insensitive). Defaults to all lists.",
 ]
 let notesProperty: [String: Any] = [
     "type": "boolean",
-    "description": "Notities meesturen (standaard true). Bij false blijft alleen has_notes over.",
+    "description": "Include notes (default true). With false only has_notes remains.",
 ]
 let readOnlyAnnotations: [String: Any] = ["readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false]
 
 let readToolDefinitions: [[String: Any]] = [
     [
         "name": "reminders_daily_overview",
-        "title": "Dagoverzicht Herinneringen",
-        "description": "Alleen-lezen dagoverzicht van open Apple Herinneringen op deze Mac (inclusief iCloud-lijsten). Geeft twee gescheiden groepen: 'due_on_date' (echt gepland op de gevraagde dag) en 'overdue' (open en achterstallig van eerdere dagen). Zonder 'date' is de dag vandaag: de kalenderdag van 00:00 tot 24:00 in de lokale tijdzone van de Mac. Per herinnering: titel, lijst, account, vervaldatum en -tijd, notities, prioriteit, herhaling, meldingen en (indien beschikbaar) subtaken. 'field_availability' vermeldt welke velden EventKit niet levert. Gebruik deze tool voor de dagelijkse planning; wijzigt nooit iets.",
+        "title": "Reminders daily overview",
+        "description": "Read-only daily overview of open Apple Reminders on this Mac (including iCloud lists). Returns two separate groups: 'due_on_date' (actually scheduled for the requested day) and 'overdue' (open and overdue from earlier days). Without 'date' the day is today: the calendar day from 00:00 to 24:00 in the Mac's local time zone. Per reminder: title, list, account, due date and time, notes, priority, recurrence, alarms and (if available) subtasks. 'field_availability' states which fields EventKit does not provide. Use this tool for daily planning; it never changes anything.",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "date": ["type": "string", "description": "Dag in lokale tijd, formaat YYYY-MM-DD, of 'vandaag' / 'morgen' / 'gisteren'. Standaard vandaag."],
-                "include_overdue": ["type": "boolean", "description": "Achterstallige open herinneringen meegeven in de aparte groep 'overdue' (standaard true)."],
-                "include_undated": ["type": "boolean", "description": "Ook open herinneringen zonder vervaldatum meegeven in de groep 'undated' (standaard false)."],
+                "date": ["type": "string", "description": "Day in local time, format YYYY-MM-DD, or 'today' / 'tomorrow' / 'yesterday'. Defaults to today."],
+                "include_overdue": ["type": "boolean", "description": "Include overdue open reminders in the separate group 'overdue' (default true)."],
+                "include_undated": ["type": "boolean", "description": "Also include open reminders without a due date in the group 'undated' (default false)."],
                 "include_notes": notesProperty,
                 "lists": listsProperty,
             ],
@@ -740,17 +740,17 @@ let readToolDefinitions: [[String: Any]] = [
     ],
     [
         "name": "reminders_list_open",
-        "title": "Alle open herinneringen",
-        "description": "Alleen-lezen: geeft de volledige lijst van alle open (niet-voltooide) Apple Herinneringen, inclusief achterstallige en herinneringen zonder vervaldatum (die krijgen has_due_date = false). Optioneel te filteren op lijst en op een periode van vervaldatums. Elke herinnering heeft is_overdue en dezelfde velden als het dagoverzicht. Gebruik dit wanneer het dagoverzicht niet volstaat, bijvoorbeeld voor weekplanning of een volledige inventaris.",
+        "title": "All open reminders",
+        "description": "Read-only: returns the full list of all open (incomplete) Apple Reminders, including overdue ones and reminders without a due date (those get has_due_date = false). Can optionally be filtered by list and by a range of due dates. Every reminder has is_overdue and the same fields as the daily overview. Use this when the daily overview is not enough, for example for weekly planning or a full inventory.",
         "inputSchema": [
             "type": "object",
             "properties": [
-                "due_from": ["type": "string", "description": "Alleen herinneringen met vervaldatum op of na deze dag (YYYY-MM-DD, lokale tijd)."],
-                "due_to": ["type": "string", "description": "Alleen herinneringen met vervaldatum tot en met deze dag (YYYY-MM-DD, lokale tijd)."],
-                "include_undated": ["type": "boolean", "description": "Herinneringen zonder vervaldatum meenemen (standaard true)."],
+                "due_from": ["type": "string", "description": "Only reminders with a due date on or after this day (YYYY-MM-DD, local time)."],
+                "due_to": ["type": "string", "description": "Only reminders with a due date up to and including this day (YYYY-MM-DD, local time)."],
+                "include_undated": ["type": "boolean", "description": "Include reminders without a due date (default true)."],
                 "include_notes": notesProperty,
                 "lists": listsProperty,
-                "limit": ["type": "integer", "minimum": 1, "description": "Maximaal aantal resultaten. Standaard geen limiet; counts.truncated meldt of er is afgekapt."],
+                "limit": ["type": "integer", "minimum": 1, "description": "Maximum number of results. No limit by default; counts.truncated reports whether the result was cut off."],
             ],
             "additionalProperties": false,
         ],
@@ -758,23 +758,23 @@ let readToolDefinitions: [[String: Any]] = [
     ],
     [
         "name": "reminders_lists",
-        "title": "Herinneringenlijsten",
-        "description": "Alleen-lezen: toont alle lijsten in Apple Herinneringen met account (bijv. iCloud) en het aantal open herinneringen per lijst. Handig om lijstnamen te vinden voor de parameter 'lists'.",
+        "title": "Reminder lists",
+        "description": "Read-only: shows all lists in Apple Reminders with account (e.g. iCloud) and the number of open reminders per list. Useful for finding list names for the 'lists' parameter.",
         "inputSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
         "annotations": readOnlyAnnotations,
     ],
     [
         "name": "reminders_access_status",
-        "title": "Toegangsstatus Herinneringen",
-        "description": "Controleert of deze server toestemming van macOS heeft om Herinneringen te lezen, zonder zelf een toestemmingsvenster te openen. Geeft bij ontbrekende of geweigerde toegang de stappen om dit in Systeeminstellingen toe te staan, plus de tijdzone en datum die als 'vandaag' gelden.",
+        "title": "Reminders access status",
+        "description": "Checks whether this server has permission from macOS to read Reminders, without opening a permission prompt itself. If access is missing or denied, returns the steps to allow it in System Settings, plus the time zone and date that count as 'today'.",
         "inputSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
         "annotations": readOnlyAnnotations,
     ],
 ]
 
-// MARK: - Schrijven (standaard uit)
+// MARK: - Writing (off by default)
 
-/// Schrijftools worden alleen aangeboden als de gebruiker ze zelf aanzet via REMINDERS_MCP_WRITE.
+/// Write tools are only offered when the user enables them via REMINDERS_MCP_WRITE.
 struct WriteAccess {
     let create: Bool
     let update: Bool
@@ -791,12 +791,12 @@ struct WriteAccess {
     }
 
     var summary: String {
-        if !any { return "De server is alleen-lezen: aanmaken, wijzigen, voltooien en verwijderen staan uit." }
+        if !any { return "The server is read-only: creating, editing, completing and deleting are disabled." }
         var on: [String] = []
-        if create { on.append("aanmaken (reminders_create, reminders_create_list)") }
-        if update { on.append("wijzigen en voltooien (reminders_update)") }
-        if delete { on.append("verwijderen (reminders_delete)") }
-        return "Schrijven is door de gebruiker aangezet voor: " + on.joined(separator: ", ") + ". Al het andere is alleen-lezen."
+        if create { on.append("creating (reminders_create, reminders_create_list)") }
+        if update { on.append("editing and completing (reminders_update)") }
+        if delete { on.append("deleting (reminders_delete)") }
+        return "Writing has been enabled by the user for: " + on.joined(separator: ", ") + ". Everything else is read-only."
     }
 }
 
@@ -813,7 +813,7 @@ func parseDueComponents(_ raw: String, local: LocalTime) throws -> DateComponent
         let pieces = timeText.split(separator: ":").map { Int($0) }
         guard timeText.allSatisfy({ $0.isNumber || $0 == ":" }), pieces.count >= 2,
               let h = pieces[0], let m = pieces[1], (0...23).contains(h), (0...59).contains(m) else {
-            throw ToolError(message: "Ongeldige tijd in '\(raw)'. Gebruik lokale tijd als YYYY-MM-DD HH:MM (bijv. 2026-11-23 09:30), zonder tijdzone.")
+            throw ToolError(message: "Invalid time in '\(raw)'. Use local time as YYYY-MM-DD HH:MM (e.g. 2026-11-23 09:30), without a time zone.")
         }
         hour = h; minute = m
     }
@@ -835,7 +835,7 @@ func parsePriority(_ value: Any) throws -> Int {
     case "high", "hoog": return 1
     case "medium", "normaal", "normal": return 5
     case "low", "laag": return 9
-    default: throw ToolError(message: "Ongeldige prioriteit. Gebruik none, low, medium of high.")
+    default: throw ToolError(message: "Invalid priority. Use none, low, medium or high.")
     }
 }
 
@@ -846,17 +846,17 @@ func parseRecurrence(_ dict: [String: Any], local: LocalTime) throws -> EKRecurr
     case "weekly", "wekelijks": frequency = .weekly
     case "monthly", "maandelijks": frequency = .monthly
     case "yearly", "jaarlijks": frequency = .yearly
-    default: throw ToolError(message: "recurrence.frequency moet daily, weekly, monthly of yearly zijn.")
+    default: throw ToolError(message: "recurrence.frequency must be daily, weekly, monthly or yearly.")
     }
     let interval = (dict["interval"] as? NSNumber)?.intValue ?? 1
-    guard interval >= 1 else { throw ToolError(message: "recurrence.interval moet 1 of hoger zijn.") }
+    guard interval >= 1 else { throw ToolError(message: "recurrence.interval must be 1 or higher.") }
 
     var days: [EKRecurrenceDayOfWeek]?
     if let names = stringArray(dict["days_of_week"]) {
         let map = ["su": 1, "zo": 1, "mo": 2, "ma": 2, "tu": 3, "di": 3, "we": 4, "wo": 4, "th": 5, "do": 5, "fr": 6, "vr": 6, "sa": 7, "za": 7]
         days = try names.map { name in
             guard let raw = map[String(name.lowercased().prefix(2))], let weekday = EKWeekday(rawValue: raw) else {
-                throw ToolError(message: "Onbekende weekdag '\(name)'. Gebruik mo, tu, we, th, fr, sa, su (of ma, di, wo, do, vr, za, zo).")
+                throw ToolError(message: "Unknown weekday '\(name)'. Use mo, tu, we, th, fr, sa, su (or ma, di, wo, do, vr, za, zo).")
             }
             return EKRecurrenceDayOfWeek(weekday)
         }
@@ -875,18 +875,18 @@ func parseRecurrence(_ dict: [String: Any], local: LocalTime) throws -> EKRecurr
 func writableList(_ store: EKEventStore, named name: String) throws -> EKCalendar {
     let matches = try reminderCalendars(store, filter: [name])
     guard matches.count == 1 else {
-        throw ToolError(message: "Er zijn \(matches.count) lijsten met de naam '\(name)'; kies een unieke lijstnaam.")
+        throw ToolError(message: "There are \(matches.count) lists named '\(name)'; choose a unique list name.")
     }
     guard matches[0].allowsContentModifications else {
-        throw ToolError(message: "De lijst '\(name)' is alleen-lezen en kan niet worden gewijzigd.")
+        throw ToolError(message: "The list '\(name)' is read-only and cannot be modified.")
     }
     return matches[0]
 }
 
-/// Past alleen de velden toe die in `args` voorkomen. JSON-null wist een veld (due, notes, recurrence).
+/// Applies only the fields present in `args`. JSON null clears a field (due, notes, recurrence).
 func applyFields(_ reminder: EKReminder, _ args: [String: Any], store: EKEventStore, local: LocalTime) throws {
     if let title = args["title"] as? String {
-        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ToolError(message: "title mag niet leeg zijn.") }
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ToolError(message: "title must not be empty.") }
         reminder.title = title
     }
     if let notes = args["notes"] {
@@ -896,7 +896,7 @@ func applyFields(_ reminder: EKReminder, _ args: [String: Any], store: EKEventSt
     if let priority = args["priority"] { reminder.priority = try parsePriority(priority) }
     if let list = args["list"] as? String { reminder.calendar = try writableList(store, named: list) }
     if let due = args["due"] {
-        // Tijdmeldingen horen bij de vervaldatum en worden mee vervangen; locatiemeldingen blijven staan.
+        // Time alarms belong to the due date and are replaced along with it; location alarms are kept.
         for alarm in reminder.alarms ?? [] where alarm.structuredLocation == nil { reminder.removeAlarm(alarm) }
         if let text = due as? String, !text.isEmpty {
             let comps = try parseDueComponents(text, local: local)
@@ -913,7 +913,7 @@ func applyFields(_ reminder: EKReminder, _ args: [String: Any], store: EKEventSt
         if let dict = recurrence as? [String: Any] { reminder.addRecurrenceRule(try parseRecurrence(dict, local: local)) }
     }
     if reminder.hasRecurrenceRules && reminder.dueDateComponents == nil {
-        throw ToolError(message: "Een herhalende herinnering heeft een vervaldatum nodig; geef 'due' op of verwijder de herhaling.")
+        throw ToolError(message: "A recurring reminder needs a due date; provide 'due' or remove the recurrence.")
     }
     if let completed = args["completed"] as? Bool { reminder.isCompleted = completed }
 }
@@ -927,34 +927,34 @@ func renderWritten(_ reminder: EKReminder, local: LocalTime) -> [String: Any] {
 }
 
 func findReminder(_ store: EKEventStore, _ args: [String: Any]) throws -> EKReminder {
-    guard let id = args["id"] as? String, !id.isEmpty else { throw ToolError(message: "Parameter 'id' ontbreekt.") }
+    guard let id = args["id"] as? String, !id.isEmpty else { throw ToolError(message: "Parameter 'id' is missing.") }
     guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else {
-        throw ToolError(message: "Geen herinnering gevonden met dit id. Id's kunnen na een iCloud-synchronisatie wijzigen; haal de herinnering opnieuw op.")
+        throw ToolError(message: "No reminder found with this id. Ids can change after an iCloud sync; fetch the reminder again.")
     }
     return reminder
 }
 
 func saveError(_ error: Error) -> ToolError {
     let ns = error as NSError
-    return ToolError(message: "macOS kon de wijziging niet opslaan (\(ns.domain) \(ns.code)).")
+    return ToolError(message: "macOS could not save the change (\(ns.domain) \(ns.code)).")
 }
 
 func toolCreate(_ args: [String: Any]) throws -> [String: Any] {
     let local = LocalTime()
-    guard args["title"] is String else { throw ToolError(message: "Parameter 'title' ontbreekt.") }
+    guard args["title"] is String else { throw ToolError(message: "Parameter 'title' is missing.") }
     let store = try obtainStore()
     let reminder = EKReminder(eventStore: store)
     if args["list"] == nil {
         guard let fallback = store.defaultCalendarForNewReminders() else {
-            throw ToolError(message: "Er is geen standaardlijst ingesteld; geef 'list' op.")
+            throw ToolError(message: "No default list is set; provide 'list'.")
         }
         reminder.calendar = fallback
     }
     try applyFields(reminder, args, store: store, local: local)
     do { try store.save(reminder, commit: true) } catch { throw saveError(error) }
-    log("reminders_create: 1 herinnering aangemaakt")
+    log("reminders_create: 1 reminder created")
     return ["created": true, "reminder": renderWritten(reminder, local: local),
-            "id_note": "Het id kan na de eerste iCloud-synchronisatie wijzigen."]
+            "id_note": "The id can change after the first iCloud sync."]
 }
 
 func toolUpdate(_ args: [String: Any]) throws -> [String: Any] {
@@ -962,10 +962,10 @@ func toolUpdate(_ args: [String: Any]) throws -> [String: Any] {
     let store = try obtainStore()
     let reminder = try findReminder(store, args)
     let fields = ["title", "notes", "priority", "list", "due", "recurrence", "completed"].filter { args[$0] != nil }
-    guard !fields.isEmpty else { throw ToolError(message: "Geen velden om te wijzigen opgegeven.") }
+    guard !fields.isEmpty else { throw ToolError(message: "No fields to change were provided.") }
     try applyFields(reminder, args, store: store, local: local)
     do { try store.save(reminder, commit: true) } catch { throw saveError(error) }
-    log("reminders_update: 1 herinnering gewijzigd (\(fields.joined(separator: ",")))")
+    log("reminders_update: 1 reminder updated (\(fields.joined(separator: ",")))")
     return ["updated": true, "changed_fields": fields, "reminder": renderWritten(reminder, local: local)]
 }
 
@@ -973,48 +973,48 @@ func toolDelete(_ args: [String: Any]) throws -> [String: Any] {
     let store = try obtainStore()
     let reminder = try findReminder(store, args)
     guard let confirm = args["confirm_title"] as? String, confirm == (reminder.title ?? "") else {
-        throw ToolError(message: "confirm_title komt niet exact overeen met de titel van deze herinnering. Er is niets verwijderd.")
+        throw ToolError(message: "confirm_title does not exactly match the title of this reminder. Nothing was deleted.")
     }
     do { try store.remove(reminder, commit: true) } catch { throw saveError(error) }
-    log("reminders_delete: 1 herinnering verwijderd")
-    return ["deleted": true, "note": "Definitief verwijderd; dit kan niet ongedaan worden gemaakt via deze server."]
+    log("reminders_delete: 1 reminder deleted")
+    return ["deleted": true, "note": "Permanently deleted; this cannot be undone via this server."]
 }
 
 func toolCreateList(_ args: [String: Any]) throws -> [String: Any] {
     guard let name = (args["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
-        throw ToolError(message: "Parameter 'name' ontbreekt.")
+        throw ToolError(message: "Parameter 'name' is missing.")
     }
     let store = try obtainStore()
     let existing = store.calendars(for: .reminder)
     guard !existing.contains(where: { $0.title.compare(name, options: [.caseInsensitive]) == .orderedSame }) else {
-        throw ToolError(message: "Er bestaat al een lijst met deze naam.")
+        throw ToolError(message: "A list with this name already exists.")
     }
     guard let source = store.defaultCalendarForNewReminders()?.source else {
-        throw ToolError(message: "Geen account gevonden om de lijst in aan te maken.")
+        throw ToolError(message: "No account found to create the list in.")
     }
     let list = EKCalendar(for: .reminder, eventStore: store)
     list.title = name
     list.source = source
     do { try store.saveCalendar(list, commit: true) } catch { throw saveError(error) }
-    log("reminders_create_list: 1 lijst aangemaakt")
+    log("reminders_create_list: 1 list created")
     return ["created": true, "list": ["name": name, "account": orNull(source.title)]]
 }
 
 let writeFieldProperties: [String: Any] = [
-    "title": ["type": "string", "description": "Titel van de herinnering."],
-    "list": ["type": "string", "description": "Naam van de lijst. Bij aanmaken standaard de standaardlijst; bij wijzigen verplaatst dit de herinnering."],
-    "due": ["type": ["string", "null"], "description": "Vervaldatum in lokale tijd: 'YYYY-MM-DD' (hele dag) of 'YYYY-MM-DD HH:MM' (met tijd, krijgt automatisch een melding). Ook 'vandaag' / 'morgen', eventueel met tijd. null wist de vervaldatum."],
-    "notes": ["type": ["string", "null"], "description": "Notitie. null of lege tekst wist de notitie."],
-    "priority": ["type": "string", "enum": ["none", "low", "medium", "high"], "description": "Prioriteit."],
+    "title": ["type": "string", "description": "Title of the reminder."],
+    "list": ["type": "string", "description": "Name of the list. When creating, defaults to the default list; when updating, this moves the reminder."],
+    "due": ["type": ["string", "null"], "description": "Due date in local time: 'YYYY-MM-DD' (all day) or 'YYYY-MM-DD HH:MM' (with a time, automatically gets an alarm). Also 'today' / 'tomorrow', optionally with a time. null clears the due date."],
+    "notes": ["type": ["string", "null"], "description": "Note. null or empty text clears the note."],
+    "priority": ["type": "string", "enum": ["none", "low", "medium", "high"], "description": "Priority."],
     "recurrence": [
         "type": ["object", "null"],
-        "description": "Herhaling; vereist een vervaldatum. null verwijdert de herhaling.",
+        "description": "Recurrence; requires a due date. null removes the recurrence.",
         "properties": [
             "frequency": ["type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]],
-            "interval": ["type": "integer", "minimum": 1, "description": "Elke N perioden (standaard 1)."],
-            "days_of_week": ["type": "array", "items": ["type": "string"], "description": "Bijv. [\"mo\", \"th\"]."],
-            "end_date": ["type": "string", "description": "Laatste dag (YYYY-MM-DD)."],
-            "count": ["type": "integer", "minimum": 1, "description": "Aantal keren, als alternatief voor end_date."],
+            "interval": ["type": "integer", "minimum": 1, "description": "Every N periods (default 1)."],
+            "days_of_week": ["type": "array", "items": ["type": "string"], "description": "E.g. [\"mo\", \"th\"]."],
+            "end_date": ["type": "string", "description": "Last day (YYYY-MM-DD)."],
+            "count": ["type": "integer", "minimum": 1, "description": "Number of occurrences, as an alternative to end_date."],
         ],
         "required": ["frequency"],
     ],
@@ -1026,27 +1026,27 @@ let writeToolDefinitions: [[String: Any]] = {
     if writeAccess.create {
         tools.append([
             "name": "reminders_create",
-            "title": "Herinnering aanmaken",
-            "description": "Maakt één nieuwe herinnering aan in Apple Herinneringen (synchroniseert via iCloud). Subtaken, tags en de vlag kunnen niet worden gezet. Geeft de aangemaakte herinnering terug.",
+            "title": "Create reminder",
+            "description": "Creates one new reminder in Apple Reminders (syncs via iCloud). Subtasks, tags and the flag cannot be set. Returns the created reminder.",
             "inputSchema": ["type": "object", "properties": writeFieldProperties, "required": ["title"], "additionalProperties": false],
             "annotations": writeAnnotations,
         ])
         tools.append([
             "name": "reminders_create_list",
-            "title": "Lijst aanmaken",
-            "description": "Maakt een nieuwe, lege herinneringenlijst aan in het account van de standaardlijst. Lijsten hernoemen of verwijderen kan niet via deze server.",
-            "inputSchema": ["type": "object", "properties": ["name": ["type": "string", "description": "Naam van de nieuwe lijst."]], "required": ["name"], "additionalProperties": false],
+            "title": "Create list",
+            "description": "Creates a new, empty reminder list in the account of the default list. Lists cannot be renamed or deleted via this server.",
+            "inputSchema": ["type": "object", "properties": ["name": ["type": "string", "description": "Name of the new list."]], "required": ["name"], "additionalProperties": false],
             "annotations": writeAnnotations,
         ])
     }
     if writeAccess.update {
         var properties = writeFieldProperties
-        properties["id"] = ["type": "string", "description": "Het 'id' van de herinnering uit een leestool."]
-        properties["completed"] = ["type": "boolean", "description": "true vinkt de herinnering af; false zet hem terug op open."]
+        properties["id"] = ["type": "string", "description": "The reminder's 'id' from a read tool."]
+        properties["completed"] = ["type": "boolean", "description": "true completes the reminder; false sets it back to open."]
         tools.append([
             "name": "reminders_update",
-            "title": "Herinnering wijzigen of afvinken",
-            "description": "Wijzigt één bestaande herinnering. Alleen de opgegeven velden veranderen; de rest blijft staan. Gebruik completed = true om af te vinken. Een nieuwe 'due' vervangt ook de tijdmelding.",
+            "title": "Update or complete reminder",
+            "description": "Updates one existing reminder. Only the provided fields change; everything else is left as is. Use completed = true to complete it. A new 'due' also replaces the time alarm.",
             "inputSchema": ["type": "object", "properties": properties, "required": ["id"], "additionalProperties": false],
             "annotations": writeAnnotations,
         ])
@@ -1054,13 +1054,13 @@ let writeToolDefinitions: [[String: Any]] = {
     if writeAccess.delete {
         tools.append([
             "name": "reminders_delete",
-            "title": "Herinnering verwijderen",
-            "description": "Verwijdert één herinnering definitief. Vereist ter controle de exacte titel in confirm_title; bij een afwijking gebeurt er niets. Vink liever af met reminders_update als de taak gewoon klaar is.",
+            "title": "Delete reminder",
+            "description": "Permanently deletes one reminder. As a check, requires the exact title in confirm_title; on a mismatch nothing happens. Prefer completing it with reminders_update if the task is simply done.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "id": ["type": "string", "description": "Het 'id' van de herinnering uit een leestool."],
-                    "confirm_title": ["type": "string", "description": "De exacte huidige titel van de herinnering, als bevestiging."],
+                    "id": ["type": "string", "description": "The reminder's 'id' from a read tool."],
+                    "confirm_title": ["type": "string", "description": "The exact current title of the reminder, as confirmation."],
                 ],
                 "required": ["id", "confirm_title"], "additionalProperties": false,
             ],
@@ -1074,7 +1074,7 @@ let toolDefinitions: [[String: Any]] = readToolDefinitions + writeToolDefinition
 
 func callTool(name: String, arguments: [String: Any]) -> (payload: [String: Any], isError: Bool) {
     let started = Date()
-    defer { log("tool \(name) klaar in \(Int(Date().timeIntervalSince(started) * 1000)) ms") }
+    defer { log("tool \(name) done in \(Int(Date().timeIntervalSince(started) * 1000)) ms") }
     do {
         switch name {
         case "reminders_daily_overview": return (try toolDailyOverview(arguments), false)
@@ -1086,16 +1086,16 @@ func callTool(name: String, arguments: [String: Any]) -> (payload: [String: Any]
         case "reminders_update" where writeAccess.update: return (try toolUpdate(arguments), false)
         case "reminders_delete" where writeAccess.delete: return (try toolDelete(arguments), false)
         case "reminders_create", "reminders_create_list", "reminders_update", "reminders_delete":
-            return (["error": "write_disabled", "message": "Deze schrijftool staat uit. De gebruiker kan hem aanzetten met de omgevingsvariabele REMINDERS_MCP_WRITE (create, update, delete of all) in de MCP-configuratie."], true)
-        default: return (["error": "unknown_tool", "message": "Onbekende tool: \(name)"], true)
+            return (["error": "write_disabled", "message": "This write tool is disabled. The user can enable it with the environment variable REMINDERS_MCP_WRITE (create, update, delete or all) in the MCP configuration."], true)
+        default: return (["error": "unknown_tool", "message": "Unknown tool: \(name)"], true)
         }
     } catch let denied as AccessDenied {
-        log("tool \(name): geen toegang tot Herinneringen")
+        log("tool \(name): no access to Reminders")
         return (["error": "reminders_access_missing", "access": denied.report], true)
     } catch let error as ToolError {
         return (["error": "invalid_request", "message": error.message], true)
     } catch {
-        return (["error": "internal_error", "message": "Onverwachte fout bij het lezen van Herinneringen."], true)
+        return (["error": "internal_error", "message": "Unexpected error while reading Reminders."], true)
     }
 }
 
@@ -1112,9 +1112,9 @@ func respondError(id: Any, code: Int, message: String) {
 }
 
 func handle(_ message: [String: Any]) {
-    guard let method = message["method"] as? String else { return } // antwoorden van de client negeren
+    guard let method = message["method"] as? String else { return } // ignore responses from the client
     let params = message["params"] as? [String: Any] ?? [:]
-    guard let id = message["id"], !(id is NSNull) else { return } // notificaties vragen geen antwoord
+    guard let id = message["id"], !(id is NSNull) else { return } // notifications do not expect a response
 
     switch method {
     case "initialize":
@@ -1123,8 +1123,8 @@ func handle(_ message: [String: Any]) {
         respond(id: id, result: [
             "protocolVersion": version,
             "capabilities": ["tools": ["listChanged": false]],
-            "serverInfo": ["name": serverName, "title": "Apple Herinneringen", "version": serverVersion],
-            "instructions": "Toegang tot Apple Herinneringen op deze Mac via EventKit. Gebruik reminders_daily_overview voor de dagplanning: 'due_on_date' zijn herinneringen voor die dag, 'overdue' zijn achterstallige; houd die groepen uit elkaar. 'Vandaag' is de kalenderdag in de lokale tijdzone van de Mac. " + writeAccess.summary + " Bij error 'reminders_access_missing': geef de stappen uit 'access.steps' door aan de gebruiker.",
+            "serverInfo": ["name": serverName, "title": "Apple Reminders", "version": serverVersion],
+            "instructions": "Access to Apple Reminders on this Mac via EventKit. Use reminders_daily_overview for daily planning: 'due_on_date' are reminders for that day, 'overdue' are overdue ones; keep those groups apart. 'Today' is the calendar day in the Mac's local time zone. " + writeAccess.summary + " On error 'reminders_access_missing': pass the steps from 'access.steps' on to the user.",
         ])
     case "ping":
         respond(id: id, result: [:])
@@ -1132,7 +1132,7 @@ func handle(_ message: [String: Any]) {
         respond(id: id, result: ["tools": toolDefinitions])
     case "tools/call":
         guard let name = params["name"] as? String else {
-            respondError(id: id, code: -32602, message: "Parameter 'name' ontbreekt.")
+            respondError(id: id, code: -32602, message: "Parameter 'name' is missing.")
             return
         }
         let outcome = callTool(name: name, arguments: params["arguments"] as? [String: Any] ?? [:])
@@ -1146,17 +1146,17 @@ func handle(_ message: [String: Any]) {
     case "prompts/list":
         respond(id: id, result: ["prompts": [Any]()])
     default:
-        respondError(id: id, code: -32601, message: "Methode niet ondersteund: \(method)")
+        respondError(id: id, code: -32601, message: "Method not supported: \(method)")
     }
 }
 
 func runServer() {
-    log("gestart (v\(serverVersion), alleen-lezen, stdio)")
+    log("started (v\(serverVersion), \(writeAccess.any ? "write tools enabled" : "read-only"), stdio)")
     while let line = readLine(strippingNewline: true) {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { continue }
         guard let data = trimmed.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data) else {
-            send(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Ongeldige JSON."]])
+            send(["jsonrpc": "2.0", "id": NSNull(), "error": ["code": -32700, "message": "Invalid JSON."]])
             continue
         }
         if let message = json as? [String: Any] {
@@ -1165,18 +1165,18 @@ func runServer() {
             batch.forEach(handle)
         }
     }
-    log("stdin gesloten; gestopt")
+    log("stdin closed; stopped")
 }
 
-// MARK: - Eigen verantwoordelijkheid voor de macOS-toestemming
+// MARK: - Own responsibility for the macOS permission
 
 @_silgen_name("responsibility_spawnattrs_setdisclaim")
 func responsibility_spawnattrs_setdisclaim(_ attrs: UnsafeMutablePointer<posix_spawnattr_t?>, _ disclaim: Int32) -> Int32
 
-/// macOS koppelt een privacytoestemming normaal aan de app die een programma start (Codex, Terminal, ...).
-/// Start die app vanuit de achtergrond of mist ze de juiste toestemmingstekst, dan verschijnt er geen venster.
-/// Daarom herstart de server zichzelf één keer als "eigen verantwoordelijke": de toestemming hoort dan bij
-/// reminders-mcp zelf en geldt ongeacht welke app de server start. Uit te zetten met REMINDERS_MCP_NO_DISCLAIM=1.
+/// macOS normally ties a privacy permission to the app that launches a program (Codex, Terminal, ...).
+/// If that app launches from the background or lacks the right usage description, no prompt appears.
+/// That is why the server re-executes itself once as its "own responsible process": the permission then
+/// belongs to reminders-mcp itself and applies regardless of which app starts the server. Disable with REMINDERS_MCP_NO_DISCLAIM=1.
 func reexecAsOwnResponsibleProcess() {
     let env = ProcessInfo.processInfo.environment
     guard env["REMINDERS_MCP_DISCLAIMED"] == nil, env["REMINDERS_MCP_NO_DISCLAIM"] == nil,
@@ -1191,9 +1191,9 @@ func reexecAsOwnResponsibleProcess() {
     var envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") }
     envp.append(strdup("REMINDERS_MCP_DISCLAIMED=1"))
     envp.append(nil)
-    // Bij succes vervangt posix_spawn (SETEXEC) dit proces; alleen bij een fout loopt de code hierna door.
+    // On success posix_spawn (SETEXEC) replaces this process; only on failure does the code below continue.
     _ = posix_spawn(nil, path, nil, &attr, argv, envp)
-    log("herstart als eigen verantwoordelijke mislukt; ga verder onder de startende app")
+    log("re-exec as own responsible process failed; continuing under the launching app")
 }
 
 // MARK: - Start
@@ -1205,7 +1205,7 @@ switch cliArguments.first {
 case nil:
     runServer()
 case "--check":
-    // Vraagt zo nodig het macOS-toestemmingsvenster aan en toont daarna de status (zonder inhoud).
+    // Requests the macOS permission prompt if needed and then shows the status (without content).
     do {
         _ = try obtainStore()
         print(jsonString(toolAccessStatus([:])))
@@ -1216,7 +1216,7 @@ case "--check":
         exit(1)
     }
 case "--overview":
-    // Eenmalig dagoverzicht naar stdout, bijv. `reminders-mcp --overview 2026-11-23`.
+    // One-off daily overview to stdout, e.g. `reminders-mcp --overview 2026-11-23`.
     var args: [String: Any] = [:]
     if cliArguments.count > 1 { args["date"] = cliArguments[1] }
     let outcome = callTool(name: "reminders_daily_overview", arguments: args)
@@ -1225,5 +1225,5 @@ case "--overview":
 case "--version":
     print("\(serverName) \(serverVersion)")
 default:
-    print("Gebruik: reminders-mcp            MCP-server over stdio (standaard)\n         reminders-mcp --check    toegang controleren / aanvragen\n         reminders-mcp --overview [YYYY-MM-DD]\n         reminders-mcp --version")
+    print("Usage: reminders-mcp            MCP server over stdio (default)\n       reminders-mcp --check    check / request access\n       reminders-mcp --overview [YYYY-MM-DD]\n       reminders-mcp --version")
 }

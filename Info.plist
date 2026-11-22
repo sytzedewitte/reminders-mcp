@@ -11,8 +11,8 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>reminders-mcp leest je open herinneringen zodat je agent een dagoverzicht kan maken. Wijzigen kan alleen als je dat zelf in de configuratie aanzet.</string>
+	<string>reminders-mcp reads your open reminders so your agent can put together a daily overview. Changes are only possible if you enable that yourself in the configuration.</string>
 	<key>NSRemindersUsageDescription</key>
-	<string>reminders-mcp leest je open herinneringen zodat je agent een dagoverzicht kan maken. Wijzigen kan alleen als je dat zelf in de configuratie aanzet.</string>
+	<string>reminders-mcp reads your open reminders so your agent can put together a daily overview. Changes are only possible if you enable that yourself in the configuration.</string>
 </dict>
 </plist>

@@ -1,73 +1,73 @@
 # reminders-mcp
 
-Lokale MCP-server voor Apple Herinneringen op macOS, **standaard alleen-lezen**. Werkt via Apple's EventKit
-met de herinneringen die macOS zelf met iCloud synchroniseert. Schrijven (aanmaken, wijzigen, verwijderen)
-zet je per onderdeel zelf aan. Geen iCloud-login, geen wachtwoord, geen
-scraping, geen netwerkverkeer: de server praat alleen via stdio met de agent die hem start.
+Local MCP server for Apple Reminders on macOS, **read-only by default**. Works through Apple's EventKit
+with the reminders that macOS itself syncs with iCloud. Writing (creating, editing, deleting) is
+something you enable yourself, per capability. No iCloud login, no password, no
+scraping, no network traffic: the server only talks over stdio to the agent that starts it.
 
-## Installeren
+## Installation
 
-Vereist: macOS 14 of nieuwer en de Xcode Command Line Tools (`xcode-select --install`).
+Requires: macOS 14 or newer and the Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
 ./build.sh install
 ```
 
-Dit bouwt één binair bestand en zet het in `~/.local/bin/reminders-mcp`. Geef daarna eenmalig toestemming:
+This builds a single binary and puts it in `~/.local/bin/reminders-mcp`. Then grant permission once:
 
 ```bash
 ~/.local/bin/reminders-mcp --check
 ```
 
-macOS toont het venster "reminders-mcp wil toegang tot je herinneringen". Kies **Sta toe**. De uitvoer
-toont daarna `"status": "full_access"`.
+macOS shows the prompt "reminders-mcp would like to access your reminders". Choose **Allow**. The output
+then shows `"status": "full_access"`.
 
-## Koppelen aan Codex
+## Connecting to Codex
 
 ```bash
 codex mcp add apple-reminders -- ~/.local/bin/reminders-mcp
 ```
 
-Of handmatig in `~/.codex/config.toml`:
+Or manually in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.apple-reminders]
-command = "/Users/JOUWNAAM/.local/bin/reminders-mcp"
+command = "/Users/YOURNAME/.local/bin/reminders-mcp"
 ```
 
-Codex start de server zelf wanneer een sessie of automatisering begint; er hoeft niets op de achtergrond
-te draaien. Voorbeeldopdracht voor de planning van 7:00:
+Codex starts the server itself when a session or automation begins; nothing needs to run in the
+background. Example prompt for the 7:00 planning:
 
-> Roep `reminders_daily_overview` aan en maak mijn dagplanning. Houd `due_on_date` (vandaag) en
-> `overdue` (achterstallig) gescheiden.
+> Call `reminders_daily_overview` and make my plan for the day. Keep `due_on_date` (today) and
+> `overdue` separate.
 
-Andere MCP-clients werken hetzelfde: commando `~/.local/bin/reminders-mcp`, transport stdio, geen argumenten.
+Other MCP clients work the same way: command `~/.local/bin/reminders-mcp`, transport stdio, no arguments.
 
 ## Tools
 
-| Tool | Doel |
+| Tool | Purpose |
 | --- | --- |
-| `reminders_daily_overview` | Dagoverzicht voor vandaag of een andere `date` (YYYY-MM-DD, `vandaag`, `morgen`). Aparte groepen `due_on_date` en `overdue`; optioneel `undated`. |
-| `reminders_list_open` | Volledige lijst van alle open herinneringen, optioneel gefilterd op lijst en vervaldatumperiode. |
-| `reminders_lists` | Alle lijsten met account en aantal open herinneringen. |
-| `reminders_access_status` | Toestemmingsstatus, tijdzone en de datum die als "vandaag" geldt. Opent geen venster. |
+| `reminders_daily_overview` | Daily overview for today or another `date` (YYYY-MM-DD, `today`, `tomorrow`). Separate groups `due_on_date` and `overdue`; optionally `undated`. |
+| `reminders_list_open` | Full list of all open reminders, optionally filtered by list and due date range. |
+| `reminders_lists` | All lists with account and number of open reminders. |
+| `reminders_access_status` | Permission status, time zone and the date that counts as "today". Does not open a prompt. |
 
-Per herinnering: `title`, `list`, `account`, `has_due_date`, `due` (`date`, `time`, `all_day`, `iso`),
+Per reminder: `title`, `list`, `account`, `has_due_date`, `due` (`date`, `time`, `all_day`, `iso`),
 `is_overdue`, `days_overdue`, `notes`, `priority`, `recurrence`, `alarms`, `created_at`, `modified_at`
-en `subtasks`. Elk antwoord bevat `field_availability` met wat EventKit wel en niet levert.
+and `subtasks`. Every response contains `field_availability` with what EventKit does and does not provide.
 
-### Schrijftools (standaard uit)
+### Write tools (off by default)
 
-Zonder instelling biedt de server alleen de vier leestools aan. Met de omgevingsvariabele
-`REMINDERS_MCP_WRITE` zet je schrijven aan; combineer met komma's of gebruik `all`.
+Without any setting the server only offers the four read tools. The environment variable
+`REMINDERS_MCP_WRITE` enables writing; combine values with commas or use `all`.
 
-| Waarde | Tools | Wat het doet |
+| Value | Tools | What it does |
 | --- | --- | --- |
-| `create` | `reminders_create`, `reminders_create_list` | Herinnering aanmaken met titel, lijst, vervaldatum/-tijd, notitie, prioriteit en herhaling; lege lijst aanmaken. |
-| `update` | `reminders_update` | Velden wijzigen, naar een andere lijst verplaatsen, afvinken of weer openzetten. |
-| `delete` | `reminders_delete` | Definitief verwijderen; vereist de exacte titel in `confirm_title`. |
+| `create` | `reminders_create`, `reminders_create_list` | Create a reminder with title, list, due date/time, note, priority and recurrence; create an empty list. |
+| `update` | `reminders_update` | Change fields, move to another list, complete or reopen. |
+| `delete` | `reminders_delete` | Delete permanently; requires the exact title in `confirm_title`. |
 
-Voor Codex, bijvoorbeeld alleen aanmaken en wijzigen:
+For Codex, for example creating and updating only:
 
 ```bash
 codex mcp remove apple-reminders
@@ -77,69 +77,69 @@ codex mcp remove apple-reminders
 codex mcp add apple-reminders --env REMINDERS_MCP_WRITE=create,update -- ~/.local/bin/reminders-mcp
 ```
 
-Een vervaldatum met tijd krijgt automatisch een melding op dat moment. Lijsten hernoemen of verwijderen
-kan niet. Subtaken, tags en de vlag kunnen niet worden gezet (EventKit biedt dat niet).
+A due date with a time automatically gets an alarm at that moment. Lists cannot be renamed or
+deleted. Subtasks, tags and the flag cannot be set (EventKit does not offer that).
 
-### Hoe "vandaag" wordt bepaald
+### How "today" is determined
 
-- **Vandaag** = de kalenderdag van 00:00 tot 24:00 in de systeemtijdzone van de Mac, bij elke aanroep
-  opnieuw uitgelezen. Elk antwoord vermeldt `time_zone`, `generated_at` en de gebruikte definitie.
-- **`due_on_date`** = open herinneringen met vervaldatum op die dag. Een tijd met eigen tijdzone wordt
-  eerst naar lokale tijd omgerekend; "hele dag" telt op de kalenderdatum. Is het tijdstip vandaag al
-  voorbij, dan blijft de herinnering hier staan met `is_overdue: true`.
-- **`overdue`** = open herinneringen met vervaldatum vóór 00:00 van vandaag (bij een datum in het
-  verleden: vóór die dag).
-- Geen vervaldatum → `has_due_date: false`, `due: null` en `due_note`. In het dagoverzicht alleen
-  meegegeven met `include_undated: true`; in `reminders_list_open` standaard.
+- **Today** = the calendar day from 00:00 to 24:00 in the Mac's system time zone, read again on
+  every call. Every response states `time_zone`, `generated_at` and the definition used.
+- **`due_on_date`** = open reminders with a due date on that day. A time with its own time zone is
+  first converted to local time; "all day" counts on the calendar date. If the time has already
+  passed today, the reminder stays here with `is_overdue: true`.
+- **`overdue`** = open reminders with a due date before 00:00 today (for a date in the
+  past: before that day).
+- No due date → `has_due_date: false`, `due: null` and `due_note`. In the daily overview only
+  included with `include_undated: true`; in `reminders_list_open` by default.
 
-## Toegang en privacy
+## Access and privacy
 
-- **Toestemming:** alleen Herinneringen. EventKit kent voor Herinneringen geen aparte leestoestemming;
-  "volledige toegang" is de kleinste toestemming waarmee lezen kan. Schrijftools bestaan alleen als
-  `REMINDERS_MCP_WRITE` ze aanzet; anders worden ze niet aangeboden en geweigerd.
-- **Geweigerd of ontbrekend:** elke tool geeft dan `reminders_access_missing` met uitleg en stappen
-  (Systeeminstellingen > Privacy en beveiliging > Herinneringen > `reminders-mcp` aanzetten). Opnieuw
-  laten vragen: `tccutil reset Reminders` en daarna `reminders-mcp --check`.
-- **Geen kopieën:** herinneringen bestaan alleen in het geheugen tijdens één aanroep. Geen cache, geen bestanden.
-- **Logs:** alleen naar stderr, alleen toolnaam, aantallen en doorlooptijd. Nooit titels, notities of lijstnamen.
-- Wat de agent met het antwoord doet (bijv. in zijn eigen sessielog bewaren) valt buiten deze server.
+- **Permission:** Reminders only. EventKit has no separate read permission for Reminders;
+  "full access" is the smallest permission that allows reading. Write tools only exist when
+  `REMINDERS_MCP_WRITE` enables them; otherwise they are not offered and are refused.
+- **Denied or missing:** every tool then returns `reminders_access_missing` with an explanation and steps
+  (System Settings > Privacy & Security > Reminders > turn on `reminders-mcp`). To be asked
+  again: `tccutil reset Reminders` and then `reminders-mcp --check`.
+- **No copies:** reminders only exist in memory during a single call. No cache, no files.
+- **Logs:** to stderr only, and only tool name, counts and duration. Never titles, notes or list names.
+- What the agent does with the response (e.g. keeping it in its own session log) is outside this server's control.
 
-## Beperkingen (eerlijk)
+## Limitations (honest)
 
-- **Subtaken:** EventKit levert geen ouder/kind-relatie. Subtaken staan wel in de resultaten, maar als
-  losse herinneringen; `subtasks` is dan `null`. Optioneel, standaard uit: met
-  `REMINDERS_MCP_SUBTASKS=sqlite` leest de server alleen de id-paren (kind → hoofdtaak) uit de lokale
-  Herinneringen-database. Dat vereist **Volledige schijftoegang** voor `reminders-mcp`, leunt op een
-  ongedocumenteerd schema dat per macOS-versie kan wijzigen, en is op deze Mac **niet getest** (geen
-  schijftoegang tijdens het bouwen). Herkent de server het schema niet, dan meldt hij dat in plaats van te gokken.
-- **Niet beschikbaar via EventKit:** tags, vlag, secties/kolommen, slimme lijsten, lijstgroepen,
-  bijlagen, toewijzing in gedeelde lijsten, vroege herinneringen; het URL-veld meestal niet.
-- **Herhaling:** je ziet de regel en de eerstvolgende open keer, niet toekomstige keren. Wat er gebeurt
-  als je een herhalende herinnering via `reminders_update` afvinkt (volgende keer wel of niet
-  aangemaakt) is **niet getest**.
-- **Id's:** het `id` van een herinnering kan na een iCloud-synchronisatie wijzigen. Haal een
-  herinnering opnieuw op vlak voordat je hem wijzigt of verwijdert.
-- **`reminders_create_list`** is gebouwd maar niet getest.
-- **Actualiteit:** de server leest wat macOS lokaal heeft gesynchroniseerd. Sliep de Mac of was hij
-  offline, dan kan het overzicht van 7:00 wijzigingen van je iPhone missen. De Mac moet aan staan en
-  ingelogd zijn; de server kan zelf geen iCloud-synchronisatie afdwingen.
-- **Toestemming hangt aan het binaire bestand:** het is ad-hoc ondertekend. Na opnieuw bouwen of
-  verplaatsen kan macOS opnieuw om toestemming vragen; voer dan `reminders-mcp --check` uit.
-- **Eigen verantwoordelijke:** normaal koppelt macOS de toestemming aan de startende app (Codex,
-  Terminal). Vanuit zo'n app verscheen er tijdens het testen geen toestemmingsvenster. Daarom herstart
-  de server zichzelf één keer via `responsibility_spawnattrs_setdisclaim`, zodat de toestemming bij
-  `reminders-mcp` zelf hoort. Dat is een niet-publieke macOS-functie (ook gebruikt door o.a. Chromium);
-  valt ze weg, dan werkt de server verder onder de toestemming van de startende app. Uitzetten:
+- **Subtasks:** EventKit does not provide a parent/child relationship. Subtasks are included in the results, but as
+  separate reminders; `subtasks` is then `null`. Optional, off by default: with
+  `REMINDERS_MCP_SUBTASKS=sqlite` the server reads only the id pairs (child → parent task) from the local
+  Reminders database. That requires **Full Disk Access** for `reminders-mcp`, relies on an
+  undocumented schema that can change per macOS version, and is **not tested** on this Mac (no
+  disk access while building). If the server does not recognize the schema, it reports that instead of guessing.
+- **Not available via EventKit:** tags, flag, sections/columns, smart lists, list groups,
+  attachments, assignment in shared lists, early reminders; the URL field usually not.
+- **Recurrence:** you see the rule and the next open occurrence, not future occurrences. What happens
+  when you complete a recurring reminder via `reminders_update` (whether or not the next occurrence
+  is created) is **not tested**.
+- **Ids:** the `id` of a reminder can change after an iCloud sync. Fetch a
+  reminder again right before you update or delete it.
+- **`reminders_create_list`** is built but not tested.
+- **Freshness:** the server reads what macOS has synced locally. If the Mac was asleep or
+  offline, the 7:00 overview can miss changes from your iPhone. The Mac must be on and
+  logged in; the server cannot force an iCloud sync itself.
+- **Permission is tied to the binary:** it is ad-hoc signed. After rebuilding or
+  moving it, macOS may ask for permission again; run `reminders-mcp --check` in that case.
+- **Own responsible process:** normally macOS ties the permission to the launching app (Codex,
+  Terminal). From such an app, no permission prompt appeared during testing. That is why the server
+  restarts itself once via `responsibility_spawnattrs_setdisclaim`, so that the permission belongs to
+  `reminders-mcp` itself. This is a non-public macOS function (also used by Chromium, among others);
+  if it goes away, the server keeps working under the launching app's permission. To disable:
   `REMINDERS_MCP_NO_DISCLAIM=1`.
 
-## Handmatig testen
+## Manual testing
 
 ```bash
 ~/.local/bin/reminders-mcp --overview
 ```
 
-Print het dagoverzicht van vandaag als JSON (met inhoud, dus alleen in je eigen terminal gebruiken).
+Prints today's daily overview as JSON (including content, so only use it in your own terminal).
 
-## Licentie
+## License
 
-MIT, zie [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
