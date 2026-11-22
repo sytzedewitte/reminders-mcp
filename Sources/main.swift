@@ -12,7 +12,7 @@ import Foundation
 import SQLite3
 
 let serverName = "apple-reminders"
-let serverVersion = "1.2.0"
+let serverVersion = "1.3.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
 // MARK: - Helpers
@@ -704,6 +704,7 @@ func toolAccessStatus(_ args: [String: Any]) -> [String: Any] {
     report["time_zone"] = local.timeZoneInfo
     report["today"] = local.dayString(local.now)
     report["read_only"] = !writeAccess.any
+    report["calendar_access"] = calendarAccessReport(EKEventStore.authorizationStatus(for: .event))
     report["write_tools"] = writeAccess.summary
     report["write_setting_source"] = writeAccess.source
     report["subtasks"] = ["note": subtasksEventKitNote, "sqlite_enrichment_enabled": ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite"]
@@ -1081,7 +1082,225 @@ let writeToolDefinitions: [[String: Any]] = {
     return tools
 }()
 
-let toolDefinitions: [[String: Any]] = readToolDefinitions + writeToolDefinitions
+
+// MARK: - Calendar (read-only)
+
+/// Same report as for Reminders, reworded for the separate macOS Calendar permission.
+func calendarAccessReport(_ status: EKAuthorizationStatus) -> [String: Any] {
+    func reword(_ text: String) -> String {
+        text.replacingOccurrences(of: "tccutil reset Reminders", with: "tccutil reset Calendar")
+            .replacingOccurrences(of: "read reminders", with: "read calendar events")
+            .replacingOccurrences(of: "Reminders", with: "Calendars")
+    }
+    var report = accessReport(status)
+    for (key, value) in report {
+        if let text = value as? String { report[key] = reword(text) }
+        if let list = value as? [String] { report[key] = list.map(reword) }
+    }
+    report["service"] = "calendar"
+    report["permission_scope"] = "Calendar access is a separate macOS permission from Reminders. EventKit only offers 'full access' for reading events. This server never creates, changes or deletes calendar events."
+    return report
+}
+
+func obtainEventStore() throws -> EKEventStore {
+    var status = EKEventStore.authorizationStatus(for: .event)
+    if status == .notDetermined {
+        log("calendar permission not determined yet; macOS permission prompt requested")
+        let requester = EKEventStore()
+        let done = DispatchSemaphore(value: 0)
+        requester.requestFullAccessToEvents { granted, error in
+            let code = (error as NSError?).map { "\($0.domain) \($0.code)" } ?? "no error"
+            log("calendar permission request finished: granted=\(granted) (\(code))")
+            done.signal()
+        }
+        let timedOut = done.wait(timeout: .now() + 120) == .timedOut
+        status = EKEventStore.authorizationStatus(for: .event)
+        if timedOut || status == .notDetermined {
+            var report = calendarAccessReport(.notDetermined)
+            report["explanation"] = "The macOS Calendar permission prompt was not answered (or macOS could not show it). Run `reminders-mcp --check-calendar` once in Terminal and choose 'Allow Full Access'; after that the server also works from the agent."
+            throw AccessDenied(report: report)
+        }
+    }
+    let report = calendarAccessReport(status)
+    guard report["can_read"] as? Bool == true else { throw AccessDenied(report: report) }
+    return EKEventStore()
+}
+
+func eventCalendars(_ store: EKEventStore, filter: [String]?) throws -> [EKCalendar] {
+    let all = store.calendars(for: .event)
+    guard let filter, !filter.isEmpty else { return all }
+    var selected: [EKCalendar] = []
+    var unknown: [String] = []
+    for name in filter {
+        let matches = all.filter { $0.title.compare(name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+        if matches.isEmpty { unknown.append(name) } else { selected.append(contentsOf: matches) }
+    }
+    if !unknown.isEmpty {
+        throw ToolError(message: "Unknown calendar(s): \(unknown.joined(separator: ", ")). Available calendars: \(all.map { $0.title }.sorted().joined(separator: ", "))")
+    }
+    return selected
+}
+
+func participationName(_ status: EKParticipantStatus) -> String {
+    switch status {
+    case .accepted: return "accepted"
+    case .declined: return "declined"
+    case .tentative: return "tentative"
+    case .pending: return "pending"
+    case .delegated: return "delegated"
+    default: return "unknown"
+    }
+}
+
+func eventJSON(_ event: EKEvent, local: LocalTime, includeNotes: Bool, windowStart: Date, windowEnd: Date) -> [String: Any] {
+    func moment(_ date: Date) -> [String: Any] {
+        [
+            "date": local.dayString(date),
+            "time": event.isAllDay ? NSNull() : local.timeString(date) as Any,
+            "iso": event.isAllDay ? local.dayString(date) : local.iso(date),
+        ]
+    }
+    var out: [String: Any] = [
+        "id": orNull(event.eventIdentifier),
+        "title": event.title ?? "",
+        "calendar": orNull(event.calendar?.title),
+        "account": orNull(event.calendar?.source?.title),
+        "all_day": event.isAllDay,
+        "start": moment(event.startDate),
+        "end": moment(event.endDate),
+        "location": orNull((event.location ?? "").isEmpty ? nil : event.location),
+        "is_recurring": event.hasRecurrenceRules,
+        "starts_before_window": event.startDate < windowStart,
+        "ends_after_window": event.endDate > windowEnd,
+    ]
+    if !event.isAllDay { out["duration_minutes"] = Int(event.endDate.timeIntervalSince(event.startDate) / 60) }
+    switch event.status {
+    case .confirmed: out["status"] = "confirmed"
+    case .tentative: out["status"] = "tentative"
+    case .canceled: out["status"] = "canceled"
+    default: out["status"] = "none"
+    }
+    switch event.availability {
+    case .busy: out["availability"] = "busy"
+    case .free: out["availability"] = "free"
+    case .tentative: out["availability"] = "tentative"
+    case .unavailable: out["availability"] = "unavailable"
+    default: out["availability"] = "not_supported"
+    }
+    if let url = event.url { out["url"] = url.absoluteString }
+    if event.hasAttendees, let attendees = event.attendees {
+        out["attendee_count"] = attendees.count
+        out["attendees"] = attendees.prefix(25).map { ["name": orNull($0.name), "status": participationName($0.participantStatus)] as [String: Any] }
+        if let me = attendees.first(where: { $0.isCurrentUser }) { out["my_response"] = participationName(me.participantStatus) }
+    }
+    if let organizer = event.organizer { out["organizer"] = orNull(organizer.name) }
+    let notes = event.hasNotes ? event.notes : nil
+    out["has_notes"] = !(notes ?? "").isEmpty
+    if includeNotes { out["notes"] = orNull((notes ?? "").isEmpty ? nil : notes) }
+    return out
+}
+
+func toolCalendarEvents(_ args: [String: Any]) throws -> [String: Any] {
+    let local = LocalTime()
+    let from = try local.parseDay(args["from"] as? String ?? args["date"] as? String ?? "today")
+    let toDay = try (args["to"] as? String).map { try local.parseDay($0) } ?? from
+    guard toDay >= from else { throw ToolError(message: "'to' must not be before 'from'.") }
+    let end = local.calendar.date(byAdding: .day, value: 1, to: toDay)!
+    guard end.timeIntervalSince(from) <= 62 * 86400 else { throw ToolError(message: "The range is limited to 62 days per call.") }
+    let includeNotes = args["include_notes"] as? Bool ?? true
+    let includeDeclined = args["include_declined"] as? Bool ?? false
+
+    let store = try obtainEventStore()
+    let calendars = try eventCalendars(store, filter: stringArray(args["calendars"]))
+    var events: [EKEvent] = []
+    if !calendars.isEmpty {
+        events = store.events(matching: store.predicateForEvents(withStart: from, end: end, calendars: calendars))
+    }
+    var declined = 0
+    events = events.filter { event in
+        let mine = event.attendees?.first(where: { $0.isCurrentUser })?.participantStatus
+        if mine == .declined { declined += 1; return includeDeclined }
+        return true
+    }
+    events.sort { ($0.startDate, $0.title ?? "") < ($1.startDate, $1.title ?? "") }
+    let render = { (event: EKEvent) in eventJSON(event, local: local, includeNotes: includeNotes, windowStart: from, windowEnd: end) }
+    let allDay = events.filter { $0.isAllDay }
+    let timed = events.filter { !$0.isAllDay }
+    log("calendar_events: all_day=\(allDay.count) timed=\(timed.count) declined_hidden=\(includeDeclined ? 0 : declined)")
+    return [
+        "from": local.dayString(from),
+        "to": local.dayString(toDay),
+        "is_today": from == local.todayStart && toDay == from,
+        "generated_at": local.iso(local.now),
+        "time_zone": local.timeZoneInfo,
+        "definition": [
+            "window": "Events that overlap 00:00 on \(local.dayString(from)) up to 24:00 on \(local.dayString(toDay)) in this Mac's local time zone (\(local.timeZone.identifier)). Without 'date' or 'from' that is today.",
+            "times": "All times are converted to the Mac's local time zone. An event that started before or ends after the window is included and flagged with starts_before_window / ends_after_window.",
+            "declined": "Events you declined are left out unless include_declined = true; counts.declined says how many there are.",
+            "scope": "All calendars visible in the macOS Calendar app on this Mac (iCloud, Google, Exchange and subscribed calendars that are set up there), each recurring event as its own occurrence.",
+        ],
+        "all_day": allDay.map(render),
+        "timed": timed.map(render),
+        "counts": ["all_day": allDay.count, "timed": timed.count, "declined": declined, "declined_included": includeDeclined],
+        "not_available_via_eventkit": [
+            "attendee_email": "E-mail addresses of attendees are not reliably available; only names and response status.",
+            "attachments": "Attachments are not available.",
+            "travel_time": "Travel time set in Calendar is not available.",
+            "video_link": "There is no separate field for a video-call link; it is usually in 'location', 'url' or 'notes'.",
+        ],
+        "read_only": true,
+    ]
+}
+
+func toolCalendarCalendars(_ args: [String: Any]) throws -> [String: Any] {
+    let store = try obtainEventStore()
+    let calendars = store.calendars(for: .event)
+        .sorted { ($0.source?.title ?? "", $0.title) < ($1.source?.title ?? "", $1.title) }
+        .map { calendar -> [String: Any] in
+            let type: String
+            switch calendar.type {
+            case .local: type = "local"
+            case .calDAV: type = "caldav"
+            case .exchange: type = "exchange"
+            case .subscription: type = "subscription"
+            case .birthday: type = "birthday"
+            @unknown default: type = "other"
+            }
+            return ["name": calendar.title, "account": orNull(calendar.source?.title), "type": type, "subscribed_or_read_only": !calendar.allowsContentModifications]
+        }
+    log("calendar_calendars: calendars=\(calendars.count)")
+    return ["calendars": calendars, "read_only": true]
+}
+
+let calendarToolDefinitions: [[String: Any]] = [
+    [
+        "name": "calendar_events",
+        "title": "Calendar events",
+        "description": "Read-only: calendar events for today, another day ('date') or a range ('from'/'to') from every calendar set up in the macOS Calendar app on this Mac (iCloud, Google, Exchange, subscriptions). Returns 'all_day' and 'timed' events separately, sorted by start, with title, calendar, start/end in local time, location, notes, attendees, your own response and status. Declined events are left out by default. Use together with reminders_daily_overview for a complete start of the day. Never changes anything.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "date": ["type": "string", "description": "Single day in local time: YYYY-MM-DD, 'today', 'tomorrow' or 'yesterday'. Default today."],
+                "from": ["type": "string", "description": "First day of a range (YYYY-MM-DD); overrides 'date'."],
+                "to": ["type": "string", "description": "Last day of the range, inclusive (YYYY-MM-DD). Maximum 62 days."],
+                "calendars": ["type": "array", "items": ["type": "string"], "description": "Optional: limit to these calendar names (case-insensitive). Default all calendars."],
+                "include_notes": ["type": "boolean", "description": "Include event notes (default true). With false only has_notes remains."],
+                "include_declined": ["type": "boolean", "description": "Also return events you declined (default false)."],
+            ],
+            "additionalProperties": false,
+        ],
+        "annotations": readOnlyAnnotations,
+    ],
+    [
+        "name": "calendar_calendars",
+        "title": "Calendars",
+        "description": "Read-only: lists all calendars visible in the macOS Calendar app with account and type. Useful for finding names for the 'calendars' parameter of calendar_events.",
+        "inputSchema": ["type": "object", "properties": [String: Any](), "additionalProperties": false],
+        "annotations": readOnlyAnnotations,
+    ],
+]
+
+let toolDefinitions: [[String: Any]] = readToolDefinitions + calendarToolDefinitions + writeToolDefinitions
 
 func callTool(name: String, arguments: [String: Any]) -> (payload: [String: Any], isError: Bool) {
     let started = Date()
@@ -1092,6 +1311,8 @@ func callTool(name: String, arguments: [String: Any]) -> (payload: [String: Any]
         case "reminders_list_open": return (try toolListOpen(arguments), false)
         case "reminders_lists": return (try toolLists(arguments), false)
         case "reminders_access_status": return (toolAccessStatus(arguments), false)
+        case "calendar_events": return (try toolCalendarEvents(arguments), false)
+        case "calendar_calendars": return (try toolCalendarCalendars(arguments), false)
         case "reminders_create" where writeAccess.create: return (try toolCreate(arguments), false)
         case "reminders_create_list" where writeAccess.create: return (try toolCreateList(arguments), false)
         case "reminders_update" where writeAccess.update: return (try toolUpdate(arguments), false)
@@ -1102,7 +1323,7 @@ func callTool(name: String, arguments: [String: Any]) -> (payload: [String: Any]
         }
     } catch let denied as AccessDenied {
         log("tool \(name): no access to Reminders")
-        return (["error": "reminders_access_missing", "access": denied.report], true)
+        return (["error": (denied.report["service"] as? String) == "calendar" ? "calendar_access_missing" : "reminders_access_missing", "access": denied.report], true)
     } catch let error as ToolError {
         return (["error": "invalid_request", "message": error.message], true)
     } catch {
@@ -1220,6 +1441,17 @@ case "--check":
     do {
         _ = try obtainStore()
         print(jsonString(toolAccessStatus([:])))
+    } catch let denied as AccessDenied {
+        print(jsonString(denied.report))
+        exit(1)
+    } catch {
+        exit(1)
+    }
+case "--check-calendar":
+    // Requests the macOS Calendar permission prompt if needed and then shows the status (without content).
+    do {
+        _ = try obtainEventStore()
+        print(jsonString(calendarAccessReport(EKEventStore.authorizationStatus(for: .event))))
     } catch let denied as AccessDenied {
         print(jsonString(denied.report))
         exit(1)

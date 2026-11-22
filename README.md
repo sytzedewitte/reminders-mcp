@@ -56,6 +56,25 @@ Per reminder: `title`, `list`, `account`, `has_due_date`, `due` (`date`, `time`,
 `is_overdue`, `days_overdue`, `notes`, `priority`, `recurrence`, `alarms`, `created_at`, `modified_at`
 and `subtasks`. Every response contains `field_availability` with what EventKit does and does not provide.
 
+### Calendar tools (read-only)
+
+| Tool | Purpose |
+| --- | --- |
+| `calendar_events` | Events for today, another `date`, or a range (`from`/`to`, max 62 days). `all_day` and `timed` are returned separately, in local time, with location, notes, attendees and your own response. Declined events are left out unless `include_declined` is true. |
+| `calendar_calendars` | All calendars with account and type. |
+
+These read every calendar that is set up in the macOS Calendar app on this Mac (iCloud, Google,
+Exchange, subscriptions). A calendar that only exists in another app, for example Outlook, is not
+visible until its account is added under System Settings > Internet Accounts with Calendars turned on.
+
+Calendar access is a separate macOS permission. Grant it once with:
+
+```bash
+~/.local/bin/reminders-mcp --check-calendar
+```
+
+There are no calendar write tools: events cannot be created, changed or deleted.
+
 ### Write tools (off by default)
 
 Without any setting the server only offers the four read tools. The environment variable
