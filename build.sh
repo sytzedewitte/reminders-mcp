@@ -23,6 +23,8 @@ echo "Built: $(pwd)/bin/reminders-mcp"
 
 if [[ "${1:-}" == "install" ]]; then
   mkdir -p "$HOME/.local/bin"
-  cp bin/reminders-mcp "$HOME/.local/bin/reminders-mcp"
+  # Copy then rename, so a running server is never overwritten in place.
+  cp bin/reminders-mcp "$HOME/.local/bin/.reminders-mcp.new"
+  mv -f "$HOME/.local/bin/.reminders-mcp.new" "$HOME/.local/bin/reminders-mcp"
   echo "Installed:$HOME/.local/bin/reminders-mcp"
 fi

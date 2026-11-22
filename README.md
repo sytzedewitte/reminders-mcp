@@ -61,6 +61,16 @@ and `subtasks`. Every response contains `field_availability` with what EventKit 
 Without any setting the server only offers the four read tools. The environment variable
 `REMINDERS_MCP_WRITE` enables writing; combine values with commas or use `all`.
 
+The setting is read from the first of these that is present:
+
+1. the argument `--write=create,update`
+2. the environment variable `REMINDERS_MCP_WRITE`
+3. the file `~/.config/reminders-mcp/write` (one line, e.g. `create,update`)
+
+Use the file when a client does not pass configured environment variables to the server. The Codex
+side of the ChatGPT desktop app was seen starting the server without them, which left it read-only.
+`reminders_access_status` reports which source is in effect (`write_setting_source`).
+
 | Value | Tools | What it does |
 | --- | --- | --- |
 | `create` | `reminders_create`, `reminders_create_list` | Create a reminder with title, list, due date/time, note, priority and recurrence; create an empty list. |

@@ -12,7 +12,7 @@ import Foundation
 import SQLite3
 
 let serverName = "apple-reminders"
-let serverVersion = "1.1.0"
+let serverVersion = "1.2.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
 // MARK: - Helpers
@@ -705,6 +705,7 @@ func toolAccessStatus(_ args: [String: Any]) -> [String: Any] {
     report["today"] = local.dayString(local.now)
     report["read_only"] = !writeAccess.any
     report["write_tools"] = writeAccess.summary
+    report["write_setting_source"] = writeAccess.source
     report["subtasks"] = ["note": subtasksEventKitNote, "sqlite_enrichment_enabled": ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite"]
     report["responsible_app_note"] = "macOS ties the permission to the app that starts this server (e.g. Codex or Terminal). So every launching app needs its own permission."
     return report
@@ -779,10 +780,20 @@ struct WriteAccess {
     let create: Bool
     let update: Bool
     let delete: Bool
+    let source: String
     var any: Bool { create || update || delete }
 
     init() {
-        let raw = ProcessInfo.processInfo.environment["REMINDERS_MCP_WRITE"] ?? ""
+        // Order: --write=... argument, then REMINDERS_MCP_WRITE, then ~/.config/reminders-mcp/write.
+        // The file exists because some hosts start the server without passing configured env vars.
+        let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--write=") }).map { String($0.dropFirst("--write=".count)) }
+        let fileURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/reminders-mcp/write")
+        let fileValue = (try? String(contentsOf: fileURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw: String
+        if let argument { raw = argument; source = "--write argument" }
+        else if let env = ProcessInfo.processInfo.environment["REMINDERS_MCP_WRITE"] { raw = env; source = "REMINDERS_MCP_WRITE" }
+        else if let fileValue { raw = fileValue; source = "~/.config/reminders-mcp/write" }
+        else { raw = ""; source = "default" }
         let parts = Set(raw.lowercased().split(whereSeparator: { ", ;".contains($0) }).map(String.init))
         let all = parts.contains("all")
         create = all || parts.contains("create")
@@ -1086,7 +1097,7 @@ func callTool(name: String, arguments: [String: Any]) -> (payload: [String: Any]
         case "reminders_update" where writeAccess.update: return (try toolUpdate(arguments), false)
         case "reminders_delete" where writeAccess.delete: return (try toolDelete(arguments), false)
         case "reminders_create", "reminders_create_list", "reminders_update", "reminders_delete":
-            return (["error": "write_disabled", "message": "This write tool is disabled. The user can enable it with the environment variable REMINDERS_MCP_WRITE (create, update, delete or all) in the MCP configuration."], true)
+            return (["error": "write_disabled", "message": "This write tool is disabled. The user can enable it with --write=..., the environment variable REMINDERS_MCP_WRITE, or the file ~/.config/reminders-mcp/write (values: create, update, delete or all), then restart the MCP client."], true)
         default: return (["error": "unknown_tool", "message": "Unknown tool: \(name)"], true)
         }
     } catch let denied as AccessDenied {
@@ -1200,7 +1211,7 @@ func reexecAsOwnResponsibleProcess() {
 
 reexecAsOwnResponsibleProcess()
 
-let cliArguments = Array(CommandLine.arguments.dropFirst())
+let cliArguments = Array(CommandLine.arguments.dropFirst()).filter { !$0.hasPrefix("--write=") }
 switch cliArguments.first {
 case nil:
     runServer()
