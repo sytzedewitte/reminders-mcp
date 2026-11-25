@@ -1,0 +1,70 @@
+name: Build
+
+# Every push and pull request is built. A tag like v1.4.0 also publishes a GitHub Release
+# with a universal (Apple Silicon + Intel) binary.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal binary
+        run: REMINDERS_MCP_ARCHS="arm64 x86_64" ./build.sh
+
+      - name: Check binary
+        run: |
+          lipo -archs bin/reminders-mcp
+          codesign --verify --verbose bin/reminders-mcp
+          bin/reminders-mcp --version
+
+      - name: Check that the versions agree
+        run: |
+          source_version=$(sed -n 's/^let serverVersion = "\(.*\)"$/\1/p' Sources/main.swift)
+          plist_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+          echo "source=$source_version plist=$plist_version ref=$GITHUB_REF_NAME"
+          test -n "$source_version"
+          test "$source_version" = "$plist_version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            test "v$source_version" = "$GITHUB_REF_NAME"
+          fi
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp bin/reminders-mcp LICENSE README.md dist/
+          name="reminders-mcp-${GITHUB_REF_NAME//\//-}-macos-universal"
+          ditto -c -k --keepParent dist "$name.zip"
+          shasum -a 256 "$name.zip" > "$name.zip.sha256"
+          echo "PACKAGE=$name.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reminders-mcp-macos-universal
+          path: |
+            ${{ env.PACKAGE }}
+            ${{ env.PACKAGE }}.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: reminders-mcp-macos-universal
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes ./*.zip ./*.sha256

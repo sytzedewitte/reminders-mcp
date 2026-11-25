@@ -7,13 +7,30 @@ scraping, no network traffic: the server only talks over stdio to the agent that
 
 ## Installation
 
-Requires: macOS 14 or newer and the Xcode Command Line Tools (`xcode-select --install`).
+Requires macOS 14 or newer. Either build it yourself or download a release.
+
+**Build from source** (needs the Xcode Command Line Tools, `xcode-select --install`):
 
 ```bash
 ./build.sh install
 ```
 
-This builds a single binary and puts it in `~/.local/bin/reminders-mcp`. Then grant permission once:
+This builds a single binary and puts it in `~/.local/bin/reminders-mcp`.
+
+**Download a release:** each version on the
+[Releases page](https://github.com/sytzedewitte/reminders-mcp/releases) has a zip with a universal
+binary (Apple Silicon and Intel), built by GitHub Actions from the tagged source, plus a `.sha256`
+file. Unzip it, then:
+
+```bash
+mkdir -p ~/.local/bin && cp reminders-mcp ~/.local/bin/ && xattr -d com.apple.quarantine ~/.local/bin/reminders-mcp
+```
+
+The binary is ad-hoc signed, not notarized by Apple, so macOS blocks it after a browser download
+until the quarantine flag is removed (the `xattr` part; it reports "No such xattr" if there is
+nothing to remove). If you would rather not trust a downloaded binary, build from source.
+
+Then grant permission once:
 
 ```bash
 ~/.local/bin/reminders-mcp --check
