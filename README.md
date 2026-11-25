@@ -135,12 +135,21 @@ deleted. Subtasks, tags and the flag cannot be set (EventKit does not offer that
 
 ## Limitations (honest)
 
-- **Subtasks:** EventKit does not provide a parent/child relationship. Subtasks are included in the results, but as
-  separate reminders; `subtasks` is then `null`. Optional, off by default: with
+- **Subtasks:** EventKit's public API has no parent/child relationship. The server reads it from
+  the reminder record EventKit keeps internally (`backingObject` → `_reminder` → `storage` →
+  `parentReminderID`), which is **not part of Apple's documented API**. It needs no extra
+  permission, but it can disappear in a macOS update; the server checks every step at runtime and
+  reports `field_availability.subtasks.status` (`eventkit_internal` when it works). Tested on
+  macOS 27 only. `EKReminder` also has a `parentID` property, but that one is never filled when
+  reading. When it works, every reminder has
+  `is_subtask`, `parent` (id and title) and `subtasks` (open subtasks only; completed ones are not
+  shown). A subtask whose parent is completed gets `parent: null` with a note. Subtasks cannot be
+  created or re-parented. Check with counts only, no content: `reminders-mcp --subtask-stats`.
+- **Subtasks, fallback:** only if `parentID` is missing, and off by default: with
   `REMINDERS_MCP_SUBTASKS=sqlite` the server reads only the id pairs (child → parent task) from the local
   Reminders database. That requires **Full Disk Access** for `reminders-mcp`, relies on an
-  undocumented schema that can change per macOS version, and is **not tested** on this Mac (no
-  disk access while building). If the server does not recognize the schema, it reports that instead of guessing.
+  undocumented schema that can change per macOS version, and is **not tested**. If the server does
+  not recognize the schema, it reports that instead of guessing.
 - **Not available via EventKit:** tags, flag, sections/columns, smart lists, list groups,
   attachments, assignment in shared lists, early reminders; the URL field usually not.
 - **Recurrence:** you see the rule and the next open occurrence, not future occurrences. What happens

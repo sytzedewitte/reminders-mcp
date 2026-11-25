@@ -12,7 +12,7 @@ import Foundation
 import SQLite3
 
 let serverName = "apple-reminders"
-let serverVersion = "1.3.0"
+let serverVersion = "1.4.0"
 let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
 // MARK: - Helpers
@@ -357,25 +357,71 @@ func alarmsJSON(_ reminder: EKReminder, local: LocalTime) -> [[String: Any]] {
     }
 }
 
-// MARK: - Subtasks (optional, via the local Reminders database)
+// MARK: - Subtasks (EventKit's internal reminder record, optionally the local Reminders database)
 
 let subtasksEventKitNote =
-    "EventKit does not return a parent/child relationship between reminders. Subtasks are included in the results, but as ordinary, separate reminders without a reference to their parent task."
+    "EventKit's public API does not return a parent/child relationship between reminders. Subtasks are included in the results, but as ordinary, separate reminders without a reference to their parent task."
 
 struct SubtaskLookup {
     /// child id -> parent id (ids as EventKit knows them)
     var parentOf: [String: String] = [:]
     var status: String = "unavailable"
     var note: String = subtasksEventKitNote
+    /// True when the parent/child relationship was actually read, so 'subtasks' can be trusted.
+    var resolved: Bool { status == "eventkit_internal" || status == "sqlite_ok" }
 }
 
-/// Reads only id pairs (child, parent) from the local Reminders database. No title, note or
-/// other content is read from the database. Only active with
-/// REMINDERS_MCP_SUBTASKS=sqlite; requires Full Disk Access for the app that starts the server.
-func loadSubtaskLookup() -> SubtaskLookup {
+/// Prefix for a parent that exists but is not among the fetched (open) reminders.
+let unresolvedParentPrefix = "unresolved-parent:"
+
+/// Calls a no-argument Objective-C getter that returns an object, only if the receiver has it.
+func privateObject(_ object: NSObject?, _ selectorName: String) -> NSObject? {
+    let selector = NSSelectorFromString(selectorName)
+    guard let object, object.responds(to: selector) else { return nil }
+    return object.perform(selector)?.takeUnretainedValue() as? NSObject
+}
+
+/// The record behind an EKReminder that holds its own id and its parent's id. EventKit keeps it
+/// internally (reminder -> backing object -> reminder record -> storage); none of this is part of
+/// Apple's documented API, so every step is checked at runtime and nil means "not available here".
+func reminderStorage(_ reminder: EKReminder) -> NSObject? {
+    let record = privateObject(privateObject(reminder, "backingObject"), "_reminder")
+    return privateObject(record, "storage")
+}
+
+/// Reads the parent of each reminder from EventKit's internal reminder record. Needs nothing beyond
+/// the Reminders permission the server already has. Returns nil when this macOS version does not
+/// expose the record, so the caller can fall back instead of reporting wrong relationships.
+func eventKitSubtaskLookup(_ items: [Item]) -> SubtaskLookup? {
+    var idOfObject: [NSObject: String] = [:]
+    var storages: [(String, NSObject)] = []
+    for item in items {
+        guard let storage = reminderStorage(item.reminder), let objectID = privateObject(storage, "objectID") else { continue }
+        idOfObject[objectID] = item.reminder.calendarItemIdentifier
+        storages.append((item.reminder.calendarItemIdentifier, storage))
+    }
+    guard storages.count == items.count, !items.isEmpty else { return nil }
+    guard storages[0].1.responds(to: NSSelectorFromString("parentReminderID")) else { return nil }
     var lookup = SubtaskLookup()
+    for (id, storage) in storages {
+        guard let parentID = privateObject(storage, "parentReminderID") else { continue }
+        lookup.parentOf[id] = idOfObject[parentID] ?? (unresolvedParentPrefix + String(parentID.hash))
+    }
+    lookup.status = "eventkit_internal"
+    lookup.note = "Subtask relationships come from the reminder record EventKit keeps internally. That record exists on this macOS version but is not part of Apple's documented API and may stop working after a macOS update. Only open subtasks are shown; completed subtasks are not."
+    return lookup
+}
+
+/// Subtask relationships for the given reminders. Uses EventKit's internal record when available.
+/// Otherwise, only with REMINDERS_MCP_SUBTASKS=sqlite, reads id pairs (child, parent) from the
+/// local Reminders database; no title, note or other content is read from the database, and it
+/// requires Full Disk Access for the app that starts the server.
+func loadSubtaskLookup(_ items: [Item]) -> SubtaskLookup {
+    if let lookup = eventKitSubtaskLookup(items) { return lookup }
+    var lookup = SubtaskLookup()
+    if items.isEmpty { lookup.status = "no_open_reminders"; return lookup }
     guard ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite" else {
-        lookup.note = subtasksEventKitNote + " Optionally the server can read the relationship from the local Reminders database (set REMINDERS_MCP_SUBTASKS=sqlite; requires Full Disk Access). This is currently disabled."
+        lookup.note = subtasksEventKitNote + " This macOS version does not expose EventKit's internal reminder record either. Optionally the server can read the relationship from the local Reminders database (set REMINDERS_MCP_SUBTASKS=sqlite; requires Full Disk Access). This is currently disabled."
         return lookup
     }
     let storesURL = FileManager.default.homeDirectoryForCurrentUser
@@ -517,7 +563,7 @@ struct Renderer {
         out["has_notes"] = !(notes ?? "").isEmpty
         if includeNotes { out["notes"] = orNull((notes ?? "").isEmpty ? nil : notes) }
 
-        if lookup.status == "sqlite_ok" {
+        if lookup.resolved {
             let children = sortItems(childrenOf[r.calendarItemIdentifier] ?? [])
             out["subtasks"] = children.map { child -> [String: Any] in
                 var c = dueFields(child)
@@ -585,7 +631,7 @@ func toolDailyOverview(_ args: [String: Any]) throws -> [String: Any] {
 
     let store = try obtainStore()
     let items = try loadItems(store, lists: stringArray(args["lists"]), local: local)
-    let renderer = Renderer(items: items, local: local, includeNotes: includeNotes, lookup: loadSubtaskLookup())
+    let renderer = Renderer(items: items, local: local, includeNotes: includeNotes, lookup: loadSubtaskLookup(items))
 
     let overdueBefore = min(target, local.todayStart)
     var dueOnDate: [Item] = [], overdue: [Item] = [], undated: [Item] = []
@@ -638,7 +684,7 @@ func toolListOpen(_ args: [String: Any]) throws -> [String: Any] {
 
     let store = try obtainStore()
     let items = try loadItems(store, lists: stringArray(args["lists"]), local: local)
-    let renderer = Renderer(items: items, local: local, includeNotes: includeNotes, lookup: loadSubtaskLookup())
+    let renderer = Renderer(items: items, local: local, includeNotes: includeNotes, lookup: loadSubtaskLookup(items))
 
     var selected = sortItems(items.filter { item in
         guard let due = item.due else { return includeUndated }
@@ -707,7 +753,10 @@ func toolAccessStatus(_ args: [String: Any]) -> [String: Any] {
     report["calendar_access"] = calendarAccessReport(EKEventStore.authorizationStatus(for: .event))
     report["write_tools"] = writeAccess.summary
     report["write_setting_source"] = writeAccess.source
-    report["subtasks"] = ["note": subtasksEventKitNote, "sqlite_enrichment_enabled": ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite"]
+    report["subtasks"] = [
+        "note": "Subtasks are recognized through the reminder record EventKit keeps internally (undocumented). Each read tool reports the outcome in field_availability.subtasks; when it works, every reminder has 'is_subtask', 'parent' and 'subtasks'.",
+        "sqlite_enrichment_enabled": ProcessInfo.processInfo.environment["REMINDERS_MCP_SUBTASKS"]?.lowercased() == "sqlite",
+    ]
     report["responsible_app_note"] = "macOS ties the permission to the app that starts this server (e.g. Codex or Terminal). So every launching app needs its own permission."
     return report
 }
@@ -1452,6 +1501,30 @@ case "--check-calendar":
     do {
         _ = try obtainEventStore()
         print(jsonString(calendarAccessReport(EKEventStore.authorizationStatus(for: .event))))
+    } catch let denied as AccessDenied {
+        print(jsonString(denied.report))
+        exit(1)
+    } catch {
+        exit(1)
+    }
+case "--subtask-stats":
+    // Counts only, no reminder content: safe to run anywhere.
+    do {
+        let local = LocalTime()
+        let store = try obtainStore()
+        let items = try loadItems(store, lists: nil, local: local)
+        let lookup = loadSubtaskLookup(items)
+        let unresolved = lookup.parentOf.values.filter { $0.hasPrefix(unresolvedParentPrefix) }.count
+        let stats: [String: Any] = [
+            "status": lookup.status,
+            "open_reminders": items.count,
+            "reminders_with_readable_record": items.filter { reminderStorage($0.reminder) != nil }.count,
+            "marked_as_subtask_by_macos": items.filter { (privateObject(privateObject($0.reminder, "backingObject"), "_reminder")?.value(forKey: "isSubtask") as? Bool) == true }.count,
+            "open_subtasks": lookup.parentOf.count,
+            "parents_with_open_subtasks": Set(lookup.parentOf.values.filter { !$0.hasPrefix(unresolvedParentPrefix) }).count,
+            "subtasks_whose_parent_is_not_open": unresolved,
+        ]
+        print(jsonString(stats))
     } catch let denied as AccessDenied {
         print(jsonString(denied.report))
         exit(1)
